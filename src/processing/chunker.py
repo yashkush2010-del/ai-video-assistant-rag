@@ -1,4 +1,4 @@
-from transcriber import transcribe_audio
+from src.processing.transcriber import transcribe_audio
 
 
 def create_chunks(segments, chunk_size=3):
