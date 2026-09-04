@@ -22,6 +22,21 @@ def search_index(index, query_embedding, k=3):
 
     return distances, indices
 
+def retrieve_chunks(index, chunks, query_embedding, k=3):
+    distances, indices = search_index(index, query_embedding, k)
+
+    results = []
+
+    for distance, i in zip(distances[0], indices[0]):
+        results.append({
+            "score": float(distance),
+            "start": chunks[i]["start"],
+            "end": chunks[i]["end"],
+            "text": chunks[i]["text"]
+        })
+
+    return results
+
 
 if __name__ == "__main__":
 
@@ -51,19 +66,33 @@ if __name__ == "__main__":
 
 query_embedding = embedding_model.encode(query)
 
-distances, indices = search_index(index, query_embedding)
+query = "What is this video about?"
 
-print("\nSearch results:")
-print("Distances:", distances)
-print("Indices:", indices)
+query_embedding = embedding_model.encode(query)
 
-print("\nRetrieved chunks:")
+results = retrieve_chunks(index, chunks, query_embedding)
 
-for i in indices[0]:
-    print(f"\nChunk {i}:")
-    print("Start:", chunks[i]["start"])
-    print("End:", chunks[i]["end"])
-    print("Text:", chunks[i]["text"])
+print("\nRetrieved results:")
+
+for result in results:
+    print("\n--------------------")
+    print("Score:", result["score"])
+    print("Timestamp:", result["start"], "-", result["end"])
+    print("Text:", result["text"])
+
+    query = "What is this video about?"
+
+query_embedding = embedding_model.encode(query)
+
+results = retrieve_chunks(index, chunks, query_embedding)
+
+print("\nRetrieved results:")
+
+for result in results:
+    print("\n--------------------")
+    print("Score:", result["score"])
+    print("Timestamp:", result["start"], "-", result["end"])
+    print("Text:", result["text"])
 
 
 
