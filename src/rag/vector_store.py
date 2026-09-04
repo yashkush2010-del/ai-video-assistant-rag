@@ -15,6 +15,13 @@ def create_index(embeddings):
 
     return index
 
+def search_index(index, query_embedding, k=3):
+    query_vector = np.array([query_embedding]).astype("float32")
+
+    distances, indices = index.search(query_vector, k)
+
+    return distances, indices
+
 
 if __name__ == "__main__":
 
@@ -39,3 +46,26 @@ if __name__ == "__main__":
     print("\nFAISS index created successfully!")
     print("Number of vectors:", index.ntotal)
     print("Vector dimension:", index.d)
+
+    query = "What is this video about?"
+
+query_embedding = embedding_model.encode(query)
+
+distances, indices = search_index(index, query_embedding)
+
+print("\nSearch results:")
+print("Distances:", distances)
+print("Indices:", indices)
+
+print("\nRetrieved chunks:")
+
+for i in indices[0]:
+    print(f"\nChunk {i}:")
+    print("Start:", chunks[i]["start"])
+    print("End:", chunks[i]["end"])
+    print("Text:", chunks[i]["text"])
+
+
+
+
+
