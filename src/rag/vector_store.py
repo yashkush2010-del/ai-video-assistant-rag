@@ -25,19 +25,19 @@ def search_index(index, query_embedding, k=3):
     return distances, indices
 
 
-def retrieve_chunks(index, chunks, query_embedding, k=3):
+def retrieve_chunks(index, chunks, query_embedding, k=3, threshold=1.5):
     distances, indices = search_index(index, query_embedding, k)
 
     results = []
 
     for distance, i in zip(distances[0], indices[0]):
-        results.append({
-            "score": float(distance),
-            "start": chunks[i]["start"],
-            "end": chunks[i]["end"],
-            "text": chunks[i]["text"]
-        })
-
+        if distance <= threshold:
+           results.append({
+              "score": float(distance),
+              "start": chunks[i]["start"],
+              "end": chunks[i]["end"],
+              "text": chunks[i]["text"]
+           })
     return results
 
 
