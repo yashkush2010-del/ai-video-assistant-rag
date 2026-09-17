@@ -87,3 +87,14 @@ if __name__ == "__main__":
 
     print("\nGenerated answer:")
     print(answer)
+
+    print("\nRelevant timestamps:")
+
+    shown_timestamps = set()
+
+    for result in results:
+        timestamp = (result["start"], result["end"])
+
+        if timestamp not in shown_timestamps:
+           print(f"[{result['start']}s - {result['end']}s]")
+           shown_timestamps.add(timestamp)

@@ -5,6 +5,7 @@ from src.processing.chunker import create_chunks
 import whisper
 
 
+
 def create_index(embeddings):
     vectors = np.array(embeddings).astype("float32")
 
@@ -15,12 +16,14 @@ def create_index(embeddings):
 
     return index
 
+
 def search_index(index, query_embedding, k=3):
     query_vector = np.array([query_embedding]).astype("float32")
 
     distances, indices = index.search(query_vector, k)
 
     return distances, indices
+
 
 def retrieve_chunks(index, chunks, query_embedding, k=3):
     distances, indices = search_index(index, query_embedding, k)
@@ -64,37 +67,14 @@ if __name__ == "__main__":
 
     query = "What is this video about?"
 
-query_embedding = embedding_model.encode(query)
+    query_embedding = embedding_model.encode(query)
 
-query = "What is this video about?"
+    results = retrieve_chunks(index, chunks, query_embedding)
 
-query_embedding = embedding_model.encode(query)
+    print("\nRetrieved results:")
 
-results = retrieve_chunks(index, chunks, query_embedding)
-
-print("\nRetrieved results:")
-
-for result in results:
-    print("\n--------------------")
-    print("Score:", result["score"])
-    print("Timestamp:", result["start"], "-", result["end"])
-    print("Text:", result["text"])
-
-    query = "What is this video about?"
-
-query_embedding = embedding_model.encode(query)
-
-results = retrieve_chunks(index, chunks, query_embedding)
-
-print("\nRetrieved results:")
-
-for result in results:
-    print("\n--------------------")
-    print("Score:", result["score"])
-    print("Timestamp:", result["start"], "-", result["end"])
-    print("Text:", result["text"])
-
-
-
-
-
+    for result in results:
+        print("\n--------------------")
+        print("Score:", result["score"])
+        print("Timestamp:", result["start"], "-", result["end"])
+        print("Text:", result["text"])

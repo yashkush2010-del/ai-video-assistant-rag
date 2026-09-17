@@ -33,7 +33,7 @@ def extract_audio(video_path, audio_path):
 
 if __name__ == "__main__":
     audio = extract_audio(
-        "data/videos/sample.mp4",
+        "data/videos/ai_video.mp4",
         "data/audio/sample.wav",
     )
 

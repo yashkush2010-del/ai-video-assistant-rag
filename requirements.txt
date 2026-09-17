@@ -1,2 +1,8 @@
 openai-whisper
 sentence-transformers
+faiss-cpu
+streamlit
+opencv-python
+python-dotenv
+OpenCV
+ollama
