@@ -96,5 +96,6 @@ if __name__ == "__main__":
         timestamp = (result["start"], result["end"])
 
         if timestamp not in shown_timestamps:
-           print(f"[{result['start']}s - {result['end']}s]")
-           shown_timestamps.add(timestamp)
+           print(f"\n[{result['start']}s - {result['end']}s]")
+        print(result["text"])
+        shown_timestamps.add(timestamp)
