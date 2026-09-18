@@ -1,7 +1,11 @@
+import os
+import hashlib
+
 import streamlit as st
 import whisper
 from sentence_transformers import SentenceTransformer
 
+from src.ingestion.audio_extractor import extract_audio
 from src.processing.chunker import create_chunks
 from src.rag.vector_store import create_index, retrieve_chunks
 from src.rag.answer_generator import prepare_context, generate_answer
@@ -20,74 +24,167 @@ def load_models():
     return whisper_model, embedding_model
 
 
-@st.cache_resource
-def prepare_video():
-    whisper_model, embedding_model = load_models()
-
-    result = whisper_model.transcribe("data/audio/sample.wav")
-    segments = result["segments"]
-
-    chunks = create_chunks(segments)
-
-    texts = [chunk["text"] for chunk in chunks]
-
-    embeddings = embedding_model.encode(texts)
-
-    index = create_index(embeddings)
-
-    return embedding_model, index, chunks
+uploaded_video = st.file_uploader(
+    "Upload a video",
+    type=["mp4", "mov", "avi", "mkv"]
+)
 
 
-embedding_model, index, chunks = prepare_video()
+if uploaded_video is not None:
 
+    video_data = uploaded_video.getvalue()
 
-question = st.text_input("Enter your question:")
+    video_hash = hashlib.md5(video_data).hexdigest()
 
+    if st.session_state.get("video_hash") != video_hash:
 
-if st.button("Ask Question"):
-
-    if question:
-
-        st.write("### Answer")
-
-        query_embedding = embedding_model.encode(question)
-
-        results = retrieve_chunks(
-            index,
-            chunks,
-            query_embedding
+        video_path = os.path.join(
+            "data",
+            "videos",
+            uploaded_video.name
         )
 
-        context = prepare_context(results)
+        with open(video_path, "wb") as file:
+            file.write(video_data)
 
-        answer = generate_answer(
-            context,
-            question
+        st.session_state.video_hash = video_hash
+
+        st.success("Video uploaded successfully!")
+
+        audio_path = os.path.join(
+            "data",
+            "audio",
+            "sample.wav"
         )
 
-        st.write(answer)
+        extract_audio(
+            video_path,
+            audio_path
+        )
 
-        st.write("### Relevant timestamps")
+        st.success("Audio extracted successfully!")
 
-        shown_timestamps = set()
+        whisper_model, embedding_model = load_models()
 
-        for result in results:
+        with st.spinner("Transcribing video..."):
 
-            timestamp = (
-                result["start"],
-                result["end"]
+            result = whisper_model.transcribe(
+                audio_path
             )
 
-            if timestamp not in shown_timestamps:
+        segments = result["segments"]
 
-                st.write(
-                    f"**[{result['start']}s - {result['end']}s]**"
-                )
+        st.success("Transcription completed!")
 
-                st.write(result["text"])
+        chunks = create_chunks(segments)
 
-                shown_timestamps.add(timestamp)
+        texts = [
+            chunk["text"]
+            for chunk in chunks
+        ]
+
+        embeddings = embedding_model.encode(
+            texts
+        )
+
+        index = create_index(
+            embeddings
+        )
+
+        st.session_state.chunks = chunks
+        st.session_state.index = index
+        st.session_state.embedding_model = embedding_model
 
     else:
 
-        st.warning("Please enter a question.")
+        st.success("Video uploaded successfully!")
+
+
+    st.video(uploaded_video)
+
+
+    if "index" in st.session_state:
+
+        question = st.text_input(
+            "Enter your question:"
+        )
+
+
+        if st.button("Ask Question"):
+
+            if question:
+
+                st.write("### Answer")
+
+                embedding_model = (
+                    st.session_state.embedding_model
+                )
+
+                index = st.session_state.index
+
+                chunks = st.session_state.chunks
+
+                query_embedding = embedding_model.encode(
+                    question
+                )
+
+                results = retrieve_chunks(
+                    index,
+                    chunks,
+                    query_embedding,
+                    threshold=2.0
+                )
+
+                context = prepare_context(
+                    results
+                )
+
+                answer = generate_answer(
+                    context,
+                    question
+                )
+
+                st.write(answer)
+
+
+                if "don't have enough information" in answer.lower():
+
+                    st.write("### Relevant timestamps")
+
+                    st.info(
+                        "No relevant information found in the video."
+                    )
+
+                else:
+
+                    st.write("### Relevant timestamps")
+
+                    shown_timestamps = set()
+
+                    for result in results:
+
+                        timestamp = (
+                            result["start"],
+                            result["end"]
+                        )
+
+                        if timestamp not in shown_timestamps:
+
+                            st.write(
+                                f"**[{result['start']}s - "
+                                f"{result['end']}s]**"
+                            )
+
+                            st.write(
+                                result["text"]
+                            )
+
+                            shown_timestamps.add(
+                                timestamp
+                            )
+
+            else:
+
+                st.warning(
+                    "Please enter a question."
+                )
