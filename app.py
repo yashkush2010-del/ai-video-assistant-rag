@@ -18,8 +18,12 @@ st.write("Ask questions about your video using RAG.")
 
 @st.cache_resource
 def load_models():
+
     whisper_model = whisper.load_model("base")
-    embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    embedding_model = SentenceTransformer(
+        "all-MiniLM-L6-v2"
+    )
 
     return whisper_model, embedding_model
 
@@ -132,22 +136,15 @@ if uploaded_video is not None:
                     index,
                     chunks,
                     query_embedding,
-                    threshold=2.0
+                    threshold=1.0
                 )
 
-                context = prepare_context(
-                    results
-                )
+                if not results:
 
-                answer = generate_answer(
-                    context,
-                    question
-                )
-
-                st.write(answer)
-
-
-                if "don't have enough information" in answer.lower():
+                    st.info(
+                        "I don't have enough information "
+                        "in the video to answer this question."
+                    )
 
                     st.write("### Relevant timestamps")
 
@@ -156,6 +153,17 @@ if uploaded_video is not None:
                     )
 
                 else:
+
+                    context = prepare_context(
+                        results
+                    )
+
+                    answer = generate_answer(
+                        context,
+                        question
+                    )
+
+                    st.write(answer)
 
                     st.write("### Relevant timestamps")
 
