@@ -5,6 +5,7 @@ def create_chunks(segments, chunk_size=3):
     chunks = []
 
     for i in range(0, len(segments), chunk_size):
+
         chunk_segments = segments[i:i + chunk_size]
 
         start = chunk_segments[0]["start"]
@@ -18,7 +19,8 @@ def create_chunks(segments, chunk_size=3):
         chunks.append({
             "start": start,
             "end": end,
-            "text": text
+            "text": text,
+            "segments": chunk_segments
         })
 
     return chunks
@@ -39,7 +41,21 @@ if __name__ == "__main__":
     print("\nReal Chunks:\n")
 
     for i, chunk in enumerate(chunks):
+
         print(f"Chunk {i + 1}")
-        print(f"Time: {chunk['start']:.2f}s - {chunk['end']:.2f}s")
+        print(
+            f"Time: {chunk['start']:.2f}s - "
+            f"{chunk['end']:.2f}s"
+        )
         print(f"Text: {chunk['text']}")
+
+        print("Original segments:")
+
+        for segment in chunk["segments"]:
+            print(
+                f"  {segment['start']:.2f}s - "
+                f"{segment['end']:.2f}s: "
+                f"{segment['text'].strip()}"
+            )
+
         print()

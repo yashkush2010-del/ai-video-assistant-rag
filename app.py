@@ -7,8 +7,15 @@ from sentence_transformers import SentenceTransformer
 
 from src.ingestion.audio_extractor import extract_audio
 from src.processing.chunker import create_chunks
-from src.rag.vector_store import create_index, retrieve_chunks
-from src.rag.answer_generator import prepare_context, generate_answer
+from src.rag.vector_store import (
+    create_index,
+    retrieve_chunks,
+    find_answer_segments
+)
+from src.rag.answer_generator import (
+    prepare_context,
+    generate_answer
+)
 
 
 st.title("AI Video Assistant")
@@ -18,12 +25,8 @@ st.write("Ask questions about your video using RAG.")
 
 @st.cache_resource
 def load_models():
-
     whisper_model = whisper.load_model("base")
-
-    embedding_model = SentenceTransformer(
-        "all-MiniLM-L6-v2"
-    )
+    embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
     return whisper_model, embedding_model
 
@@ -40,6 +43,7 @@ if uploaded_video is not None:
 
     video_hash = hashlib.md5(video_data).hexdigest()
 
+    # Process video only when a new video is uploaded
     if st.session_state.get("video_hash") != video_hash:
 
         video_path = os.path.join(
@@ -55,6 +59,7 @@ if uploaded_video is not None:
 
         st.success("Video uploaded successfully!")
 
+        # Extract audio
         audio_path = os.path.join(
             "data",
             "audio",
@@ -68,8 +73,10 @@ if uploaded_video is not None:
 
         st.success("Audio extracted successfully!")
 
+        # Load models
         whisper_model, embedding_model = load_models()
 
+        # Transcription
         with st.spinner("Transcribing video..."):
 
             result = whisper_model.transcribe(
@@ -80,8 +87,12 @@ if uploaded_video is not None:
 
         st.success("Transcription completed!")
 
-        chunks = create_chunks(segments)
+        # Create chunks
+        chunks = create_chunks(
+            segments
+        )
 
+        # Create embeddings
         texts = [
             chunk["text"]
             for chunk in chunks
@@ -91,10 +102,12 @@ if uploaded_video is not None:
             texts
         )
 
+        # Create FAISS index
         index = create_index(
             embeddings
         )
 
+        # Store everything in session state
         st.session_state.chunks = chunks
         st.session_state.index = index
         st.session_state.embedding_model = embedding_model
@@ -103,16 +116,15 @@ if uploaded_video is not None:
 
         st.success("Video uploaded successfully!")
 
-
+    # Show video
     st.video(uploaded_video)
 
-
+    # Question answering
     if "index" in st.session_state:
 
         question = st.text_input(
             "Enter your question:"
         )
-
 
         if st.button("Ask Question"):
 
@@ -128,10 +140,12 @@ if uploaded_video is not None:
 
                 chunks = st.session_state.chunks
 
+                # Convert question into embedding
                 query_embedding = embedding_model.encode(
                     question
                 )
 
+                # Retrieve relevant chunks
                 results = retrieve_chunks(
                     index,
                     chunks,
@@ -139,12 +153,21 @@ if uploaded_video is not None:
                     threshold=1.0
                 )
 
-                if not results:
+                # Prepare context
+                context = prepare_context(
+                    results
+                )
 
-                    st.info(
-                        "I don't have enough information "
-                        "in the video to answer this question."
-                    )
+                # Generate answer using Llama
+                answer = generate_answer(
+                    context,
+                    question
+                )
+
+                st.write(answer)
+
+                # Check if video contains the answer
+                if "don't have enough information" in answer.lower():
 
                     st.write("### Relevant timestamps")
 
@@ -154,42 +177,26 @@ if uploaded_video is not None:
 
                 else:
 
-                    context = prepare_context(
-                        results
+                    # Find precise evidence segments
+                    evidence_segments = find_answer_segments(
+                        results,
+                        answer,
+                        embedding_model,
+                        max_segments=1
                     )
-
-                    answer = generate_answer(
-                        context,
-                        question
-                    )
-
-                    st.write(answer)
 
                     st.write("### Relevant timestamps")
 
-                    shown_timestamps = set()
+                    for segment in evidence_segments:
 
-                    for result in results:
-
-                        timestamp = (
-                            result["start"],
-                            result["end"]
+                        st.write(
+                            f"**[{segment['start']}s - "
+                            f"{segment['end']}s]**"
                         )
 
-                        if timestamp not in shown_timestamps:
-
-                            st.write(
-                                f"**[{result['start']}s - "
-                                f"{result['end']}s]**"
-                            )
-
-                            st.write(
-                                result["text"]
-                            )
-
-                            shown_timestamps.add(
-                                timestamp
-                            )
+                        st.write(
+                            segment["text"]
+                        )
 
             else:
 
