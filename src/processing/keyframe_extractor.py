@@ -51,7 +51,6 @@ def extract_keyframes(video_path, output_dir, interval=5):
     return keyframes
 
 
-
 def match_keyframes_with_transcript(
     keyframes,
     segments,
@@ -94,6 +93,25 @@ def match_keyframes_with_transcript(
 
     return matched_frames
 
+
+def create_multimodal_records(matched_frames):
+    records = []
+
+    for frame in matched_frames:
+        record = {
+            "video_name": frame["video_name"],
+            "timestamp": frame["timestamp"],
+            "image_path": frame["image_path"],
+            "transcript_text": frame["transcript_text"],
+            "segment_start": frame["segment_start"],
+            "segment_end": frame["segment_end"]
+        }
+
+        records.append(record)
+
+    return records
+
+
 if __name__ == "__main__":
     frames = extract_keyframes(
         "data/videos/machine_learning.mp4",
@@ -106,3 +124,8 @@ if __name__ == "__main__":
     print("\nFirst keyframe metadata:")
     if frames:
         print(frames[0])
+
+    print("\nMatching keyframes with transcript...")
+
+    # This section is for testing the record structure.
+    # Actual Whisper segments will be supplied in the next integration step.
