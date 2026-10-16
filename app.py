@@ -13,29 +13,29 @@ from src.processing.chunker import create_chunks
 from src.processing.keyframe_extractor import (
     extract_keyframes,
     match_keyframes_with_transcript,
-    create_multimodal_records,
+    create_multimodal_records
 )
 
 from src.rag.vector_store import (
     create_index,
     retrieve_chunks,
-    find_answer_segments,
+    find_answer_segments
 )
 
 from src.rag.answer_generator import (
     prepare_context,
-    generate_answer,
+    generate_answer
 )
 
 
 # ============================================================
-# PAGE CONFIG
+# PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
     page_title="AI Video Assistant",
     page_icon="🎥",
-    layout="wide",
+    layout="wide"
 )
 
 
@@ -46,7 +46,8 @@ st.set_page_config(
 st.title("🎥 AI Video Assistant")
 
 st.write(
-    "We know humans learn from their past experiences"
+    "Upload a video and ask questions about its content using "
+    "RAG, timestamped transcripts, and keyframes."
 )
 
 
@@ -57,13 +58,149 @@ st.write(
 @st.cache_resource
 def load_models():
 
-    whisper_model = whisper.load_model("base")
+    whisper_model = whisper.load_model(
+        "base"
+    )
 
     embedding_model = SentenceTransformer(
         "all-MiniLM-L6-v2"
     )
 
-    return whisper_model, embedding_model
+    return (
+        whisper_model,
+        embedding_model
+    )
+
+
+# ============================================================
+# VIDEO SEEK HELPER
+# ============================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# st.video(..., start_time=X) only sets the INITIAL playback
+# position of the player. It is a declarative argument, not a
+# command. Two things follow from that:
+#
+#   1. If the value is the same as in the previous run (for
+#      example the user scrubbed the player and then clicks the
+#      same "Jump to Xs" button again), the browser receives no
+#      change and the player is NOT moved.
+#
+#   2. The player is rendered at the TOP of the page while the
+#      Jump buttons are far below it, so even when the player
+#      does move, the user never sees or hears it happen.
+#
+# This helper sends an explicit command to the real <video>
+# element in the browser: seek to the requested time, bring the
+# player into view and start playback.
+#
+# st.video() stays exactly as it is. This is only added on top.
+
+# Start playing after a jump (browsers may block this silently).
+AUTOPLAY_AFTER_JUMP = True
+
+# Scroll the page so the player is visible after a jump.
+SCROLL_TO_PLAYER_ON_JUMP = True
+
+
+def seek_video_player(seconds, request_id):
+
+    script = """
+<script>
+(function () {
+    // request id: __REQUEST_ID__
+    // This number changes on every click, so the iframe content
+    // is different every time and the script runs again even
+    // when the same timestamp is requested twice.
+
+    var TARGET = __SECONDS__;
+    var AUTOPLAY = __AUTOPLAY__;
+    var SCROLL = __SCROLL__;
+    var attempts = 0;
+
+    function findVideo() {
+        var doc = window.parent.document;
+        return (
+            doc.querySelector('video[data-testid="stVideo"]') ||
+            doc.querySelector('video')
+        );
+    }
+
+    function seek(video) {
+
+        function apply() {
+            video.currentTime = TARGET;
+
+            if (SCROLL) {
+                video.scrollIntoView({
+                    behavior: "smooth",
+                    block: "center"
+                });
+            }
+
+            if (AUTOPLAY) {
+                var playing = video.play();
+                if (playing && playing.catch) {
+                    playing.catch(function () {});
+                }
+            }
+        }
+
+        // readyState 0 = no metadata yet, seeking has to wait.
+        if (video.readyState >= 1) {
+            apply();
+        } else {
+            video.addEventListener(
+                "loadedmetadata",
+                apply,
+                { once: true }
+            );
+        }
+    }
+
+    function waitForVideo() {
+        try {
+            var video = findVideo();
+
+            if (video) {
+                seek(video);
+                return;
+            }
+        } catch (error) {
+            console.error("Video seek failed:", error);
+            return;
+        }
+
+        attempts += 1;
+
+        if (attempts < 50) {
+            setTimeout(waitForVideo, 100);
+        }
+    }
+
+    waitForVideo();
+})();
+</script>
+"""
+
+    script = (
+        script
+        .replace("__REQUEST_ID__", str(int(request_id)))
+        .replace("__SECONDS__", str(float(seconds)))
+        .replace("__AUTOPLAY__", "true" if AUTOPLAY_AFTER_JUMP else "false")
+        .replace("__SCROLL__", "true" if SCROLL_TO_PLAYER_ON_JUMP else "false")
+        .strip()
+    )
+
+    # Newer Streamlit versions provide st.iframe and mark
+    # components.v1.html as deprecated (it would show a warning
+    # banner in the app). Older versions only have components.html.
+    if hasattr(st, "iframe"):
+        st.iframe(script, height=1)
+    else:
+        import streamlit.components.v1 as components
+        components.html(script, height=0)
 
 
 # ============================================================
@@ -72,18 +209,6 @@ def load_models():
 
 if "video_hash" not in st.session_state:
     st.session_state.video_hash = None
-
-if "video_path" not in st.session_state:
-    st.session_state.video_path = None
-
-if "video_name" not in st.session_state:
-    st.session_state.video_name = None
-
-if "video_data" not in st.session_state:
-    st.session_state.video_data = None
-
-if "segments" not in st.session_state:
-    st.session_state.segments = None
 
 if "chunks" not in st.session_state:
     st.session_state.chunks = None
@@ -94,45 +219,63 @@ if "index" not in st.session_state:
 if "embedding_model" not in st.session_state:
     st.session_state.embedding_model = None
 
-if "keyframes" not in st.session_state:
-    st.session_state.keyframes = None
-
 if "multimodal_records" not in st.session_state:
     st.session_state.multimodal_records = None
 
-if "question" not in st.session_state:
-    st.session_state.question = ""
+if "keyframes" not in st.session_state:
+    st.session_state.keyframes = None
 
-if "answer" not in st.session_state:
-    st.session_state.answer = None
+if "segments" not in st.session_state:
+    st.session_state.segments = None
 
-if "evidence_segments" not in st.session_state:
-    st.session_state.evidence_segments = []
+if "video_path" not in st.session_state:
+    st.session_state.video_path = None
 
-# ------------------------------------------------------------
-# This controls the timestamp at which the video starts.
-# ------------------------------------------------------------
+if "video_name" not in st.session_state:
+    st.session_state.video_name = None
 
+if "video_data" not in st.session_state:
+    st.session_state.video_data = None
+
+# Timestamp used by the video player
 if "jump_time" not in st.session_state:
-    st.session_state.jump_time = 0
+    st.session_state.jump_time = None
+
+# One-shot command for the browser: seek the real <video> element.
+# Holds {"time": seconds, "id": counter} until it has been sent.
+if "seek_request" not in st.session_state:
+    st.session_state.seek_request = None
+
+if "seek_counter" not in st.session_state:
+    st.session_state.seek_counter = 0
+
+# Store the last question/answer so a jump rerun
+# does not remove the previous result
+if "last_question" not in st.session_state:
+    st.session_state.last_question = ""
+
+if "last_answer" not in st.session_state:
+    st.session_state.last_answer = None
+
+if "last_evidence_segments" not in st.session_state:
+    st.session_state.last_evidence_segments = []
+
+if "last_related_keyframe" not in st.session_state:
+    st.session_state.last_related_keyframe = None
 
 
 # ============================================================
-# JUMP CALLBACK
-# ============================================================
-
-def jump_to_timestamp(timestamp):
-
-    st.session_state.jump_time = int(timestamp)
-
-
-# ============================================================
-# UPLOAD VIDEO
+# VIDEO UPLOAD
 # ============================================================
 
 uploaded_video = st.file_uploader(
     "Upload a video",
-    type=["mp4", "mov", "avi", "mkv"],
+    type=[
+        "mp4",
+        "mov",
+        "avi",
+        "mkv"
+    ]
 )
 
 
@@ -150,13 +293,13 @@ if uploaded_video is not None:
 
 
     # ========================================================
-    # ONLY PROCESS A NEW VIDEO
+    # PROCESS ONLY IF NEW VIDEO
     # ========================================================
 
     if st.session_state.video_hash != video_hash:
 
         # ----------------------------------------------------
-        # DIRECTORIES
+        # CREATE DIRECTORIES
         # ----------------------------------------------------
 
         os.makedirs(
@@ -190,40 +333,57 @@ if uploaded_video is not None:
             uploaded_video.name
         )
 
-
         with open(
             video_path,
             "wb"
         ) as file:
 
-            file.write(video_data)
+            file.write(
+                video_data
+            )
 
 
         # ----------------------------------------------------
-        # SAVE SESSION INFORMATION
+        # STORE VIDEO INFORMATION
         # ----------------------------------------------------
 
         st.session_state.video_hash = video_hash
 
-        st.session_state.video_path = video_path
+        st.session_state.video_path = (
+            video_path
+        )
 
-        st.session_state.video_name = os.path.splitext(
-            uploaded_video.name
-        )[0]
+        st.session_state.video_name = (
+            os.path.splitext(
+                uploaded_video.name
+            )[0]
+        )
 
-        st.session_state.video_data = video_data
+        st.session_state.video_data = (
+            video_data
+        )
 
-        st.session_state.jump_time = 0
+        # Reset previous question state
+        st.session_state.jump_time = None
 
-        st.session_state.question = ""
+        st.session_state.seek_request = None
 
-        st.session_state.answer = None
+        st.session_state.last_question = ""
 
-        st.session_state.evidence_segments = []
+        st.session_state.last_answer = None
+
+        st.session_state.last_evidence_segments = []
+
+        st.session_state.last_related_keyframe = None
+
+
+        st.success(
+            "Video uploaded successfully!"
+        )
 
 
         # ====================================================
-        # AUDIO
+        # EXTRACT AUDIO
         # ====================================================
 
         audio_path = os.path.join(
@@ -232,9 +392,8 @@ if uploaded_video is not None:
             "sample.wav"
         )
 
-
         with st.spinner(
-            "Extracting audio..."
+            "Extracting audio from video..."
         ):
 
             extract_audio(
@@ -242,23 +401,23 @@ if uploaded_video is not None:
                 audio_path
             )
 
-
         st.success(
             "Audio extracted successfully!"
         )
 
 
         # ====================================================
-        # MODELS
+        # LOAD MODELS
         # ====================================================
 
         with st.spinner(
             "Loading AI models..."
         ):
 
-            whisper_model, embedding_model = (
-                load_models()
-            )
+            (
+                whisper_model,
+                embedding_model
+            ) = load_models()
 
 
         # ====================================================
@@ -273,11 +432,13 @@ if uploaded_video is not None:
                 audio_path
             )
 
+        segments = result[
+            "segments"
+        ]
 
-        segments = result["segments"]
-
-        st.session_state.segments = segments
-
+        st.session_state.segments = (
+            segments
+        )
 
         st.success(
             "Transcription completed!"
@@ -285,11 +446,11 @@ if uploaded_video is not None:
 
 
         # ====================================================
-        # KEYFRAMES
+        # KEYFRAME EXTRACTION
         # ====================================================
 
         with st.spinner(
-            "Extracting keyframes..."
+            "Extracting video keyframes..."
         ):
 
             video_name = (
@@ -308,9 +469,9 @@ if uploaded_video is not None:
                 interval=30
             )
 
-
-        st.session_state.keyframes = keyframes
-
+        st.session_state.keyframes = (
+            keyframes
+        )
 
         st.success(
             f"Extracted {len(keyframes)} keyframes!"
@@ -333,9 +494,14 @@ if uploaded_video is not None:
                 )
             )
 
+        st.success(
+            f"Matched {len(matched_frames)} "
+            "keyframes with transcript segments!"
+        )
+
 
         # ====================================================
-        # MULTIMODAL RECORDS
+        # CREATE MULTIMODAL RECORDS
         # ====================================================
 
         multimodal_records = (
@@ -344,22 +510,20 @@ if uploaded_video is not None:
             )
         )
 
-
         st.session_state.multimodal_records = (
             multimodal_records
         )
 
 
-        # ----------------------------------------------------
-        # SAVE RECORDS
-        # ----------------------------------------------------
+        # ====================================================
+        # SAVE MULTIMODAL RECORDS
+        # ====================================================
 
         records_path = os.path.join(
             "data",
             "processed",
             f"{video_name}_multimodal_records.json"
         )
-
 
         with open(
             records_path,
@@ -374,6 +538,10 @@ if uploaded_video is not None:
                 ensure_ascii=False
             )
 
+        st.success(
+            "Multimodal records saved successfully!"
+        )
+
 
         # ====================================================
         # CREATE CHUNKS
@@ -385,7 +553,7 @@ if uploaded_video is not None:
 
 
         # ====================================================
-        # EMBEDDINGS
+        # CREATE EMBEDDINGS
         # ====================================================
 
         with st.spinner(
@@ -397,13 +565,16 @@ if uploaded_video is not None:
                 for chunk in chunks
             ]
 
-            embeddings = embedding_model.encode(
-                texts
+            embeddings = (
+                embedding_model.encode(
+                    texts,
+                    normalize_embeddings=True
+                )
             )
 
 
         # ====================================================
-        # FAISS INDEX
+        # CREATE FAISS INDEX
         # ====================================================
 
         index = create_index(
@@ -412,17 +583,20 @@ if uploaded_video is not None:
 
 
         # ====================================================
-        # SAVE RAG STATE
+        # STORE IN SESSION STATE
         # ====================================================
 
-        st.session_state.chunks = chunks
+        st.session_state.chunks = (
+            chunks
+        )
 
-        st.session_state.index = index
+        st.session_state.index = (
+            index
+        )
 
         st.session_state.embedding_model = (
             embedding_model
         )
-
 
         st.success(
             "Video processing completed!"
@@ -430,27 +604,55 @@ if uploaded_video is not None:
 
 
 # ============================================================
-# INITIAL VIDEO
-#
-# Only show the normal video here when there is no answer yet.
-# Once the user asks a question, the video moves directly
-# underneath the timestamp section.
+# VIDEO PLAYER
 # ============================================================
 
-if (
-    st.session_state.video_data is not None
-    and st.session_state.answer is None
-):
+if st.session_state.video_data is not None:
 
     st.markdown(
-        "## 🎬 Video"
+        "## 🎬 Video Player"
+    )
+
+
+    # ========================================================
+    # IMPORTANT:
+    # USE jump_time AS THE VIDEO START TIME
+    # ========================================================
+
+    current_start_time = (
+        st.session_state.jump_time
+        if st.session_state.jump_time is not None
+        else 0
     )
 
     st.video(
         st.session_state.video_data,
-        format="video/mp4",
-        start_time=st.session_state.jump_time,
+        start_time=current_start_time
     )
+
+
+    # ========================================================
+    # SHOW CURRENT JUMP INFORMATION
+    # ========================================================
+
+    if st.session_state.jump_time is not None:
+
+        jump_time = (
+            st.session_state.jump_time
+        )
+
+        st.success(
+            f"🎯 Video opened at approximately "
+            f"{int(jump_time)} seconds."
+        )
+
+        if st.button(
+            "⬅️ Return to Beginning"
+        ):
+
+            st.session_state.jump_time = None
+
+            st.rerun()
 
 
 # ============================================================
@@ -460,7 +662,6 @@ if (
 if (
     st.session_state.multimodal_records
     is not None
-    and st.session_state.answer is None
 ):
 
     records = (
@@ -481,21 +682,29 @@ if (
 
     if records:
 
+        # ----------------------------------------------------
+        # FIRST RECORD
+        # ----------------------------------------------------
+
+        first_record = records[0]
+
+
         with st.expander(
             "View first multimodal record"
         ):
 
             st.json(
-                records[0]
+                first_record
             )
 
+
+        # ----------------------------------------------------
+        # KEYFRAME PREVIEW
+        # ----------------------------------------------------
 
         st.markdown(
             "### 🖼️ Keyframe Preview"
         )
-
-
-        first_record = records[0]
 
 
         if os.path.exists(
@@ -506,17 +715,45 @@ if (
                 first_record["image_path"],
                 caption=(
                     "Timestamp: "
-                    f"{first_record['timestamp']} seconds"
+                    f"{first_record['timestamp']} "
+                    "seconds"
                 ),
-                use_container_width=True,
+                use_container_width=True
             )
 
 
+        # ----------------------------------------------------
+        # ASSOCIATED TRANSCRIPT
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### 📝 Associated Transcript"
+        )
+
+
+        st.write(
+            first_record[
+                "transcript_text"
+            ]
+        )
+
+
+    else:
+
+        st.info(
+            "No keyframes matched the transcript "
+            "within the allowed tolerance."
+        )
+
+
 # ============================================================
-# QUESTION SECTION
+# QUESTION ANSWERING
 # ============================================================
 
-if st.session_state.index is not None:
+if (
+    st.session_state.index
+    is not None
+):
 
     st.markdown(
         "## 💬 Ask Questions About Your Video"
@@ -525,17 +762,16 @@ if st.session_state.index is not None:
 
     question = st.text_input(
         "Enter your question:",
-        value=st.session_state.question,
+        value=st.session_state.last_question,
         placeholder=(
-            "Example: What is mentioned "
-            "about machine learning?"
-        ),
+            "Example: What is mentioned about "
+            "machine learning?"
+        )
     )
 
 
     ask_button = st.button(
-        "🔍 Ask Question",
-        key="ask_question",
+        "🔍 Ask Question"
     )
 
 
@@ -545,7 +781,7 @@ if st.session_state.index is not None:
 
     if ask_button:
 
-        if not question.strip():
+        if not question:
 
             st.warning(
                 "Please enter a question."
@@ -553,23 +789,8 @@ if st.session_state.index is not None:
 
         else:
 
-            st.session_state.question = question
-
-
             # ------------------------------------------------
-            # RESET OLD RESULTS
-            # ------------------------------------------------
-
-            st.session_state.answer = None
-
-            st.session_state.evidence_segments = []
-
-            # Start video from beginning for a new question
-            st.session_state.jump_time = 0
-
-
-            # ------------------------------------------------
-            # GET RAG DATA
+            # GET STORED MODELS / DATA
             # ------------------------------------------------
 
             embedding_model = (
@@ -591,25 +812,27 @@ if st.session_state.index is not None:
 
             query_embedding = (
                 embedding_model.encode(
-                    question
+                    question,
+                    normalize_embeddings=True
                 )
             )
 
 
             # ------------------------------------------------
-            # RETRIEVAL
+            # RETRIEVE RELEVANT CHUNKS
             # ------------------------------------------------
 
             results = retrieve_chunks(
                 index,
                 chunks,
                 query_embedding,
-                threshold=2.0,
+                k=6,
+                threshold=0.25
             )
 
 
             # ------------------------------------------------
-            # CONTEXT
+            # PREPARE CONTEXT
             # ------------------------------------------------
 
             context = prepare_context(
@@ -631,260 +854,345 @@ if st.session_state.index is not None:
                 )
 
 
-            st.session_state.answer = answer
+            # ------------------------------------------------
+            # SAVE ANSWER IN SESSION STATE
+            # ------------------------------------------------
+
+            st.session_state.last_question = (
+                question
+            )
+
+            st.session_state.last_answer = (
+                answer
+            )
+
+
+            # Clear previous jump when asking a new question
+            st.session_state.jump_time = None
 
 
             # =================================================
-            # FIND EVIDENCE
+            # FIND EVIDENCE SEGMENTS
             # =================================================
 
             if (
                 "don't have enough information"
-                not in answer.lower()
+                in answer.lower()
             ):
+
+                st.session_state.last_evidence_segments = []
+
+                st.session_state.last_related_keyframe = None
+
+            else:
 
                 evidence_segments = (
                     find_answer_segments(
                         results,
                         answer,
                         embedding_model,
-                        max_segments=1,
+                        max_segments=1
                     )
                 )
 
 
-                st.session_state.evidence_segments = (
+                st.session_state.last_evidence_segments = (
                     evidence_segments
                 )
 
 
-# ============================================================
-# DISPLAY ANSWER
-# ============================================================
+                # =================================================
+                # FIND RELATED KEYFRAME
+                # =================================================
 
-if st.session_state.answer is not None:
-
-    # ========================================================
-    # ANSWER
-    # ========================================================
-
-    st.markdown(
-        "## 🧠 Answer"
-    )
+                related_keyframe = None
 
 
-    st.write(
-        st.session_state.answer
-    )
+                records = (
+                    st.session_state.multimodal_records
+                )
 
 
-    # ========================================================
-    # TIMESTAMPS
-    # ========================================================
+                if (
+                    records
+                    and evidence_segments
+                ):
 
-    st.markdown(
-        "## ⏱️ Relevant Timestamps"
-    )
-
-
-    evidence_segments = (
-        st.session_state.evidence_segments
-    )
-
-
-    if not evidence_segments:
-
-        st.info(
-            "No precise evidence segment was found."
-        )
+                    start_time = (
+                        float(
+                            evidence_segments[0][
+                                "start"
+                            ]
+                        )
+                    )
 
 
-    else:
-
-        # ====================================================
-        # EVIDENCE
-        # ====================================================
-
-        for i, segment in enumerate(
-            evidence_segments
-        ):
-
-            start_time = int(
-                segment["start"]
-            )
-
-            end_time = int(
-                segment["end"]
-            )
+                    closest_distance = (
+                        float("inf")
+                    )
 
 
-            st.markdown(
-                f"### ⏱️ "
-                f"[{segment['start']:.1f}s - "
-                f"{segment['end']:.1f}s]"
-            )
+                    for record in records:
+
+                        try:
+
+                            record_time = float(
+                                record[
+                                    "timestamp"
+                                ]
+                            )
 
 
-            st.write(
-                segment["text"]
-            )
+                            distance = abs(
+                                record_time
+                                - start_time
+                            )
+
+
+                            if (
+                                distance
+                                < closest_distance
+                            ):
+
+                                closest_distance = (
+                                    distance
+                                )
+
+                                related_keyframe = (
+                                    record
+                                )
+
+
+                        except (
+                            KeyError,
+                            ValueError,
+                            TypeError
+                        ):
+
+                            continue
+
+
+                st.session_state.last_related_keyframe = (
+                    related_keyframe
+                )
 
 
             # =================================================
-            # JUMP BUTTON
+            # FORCE RERUN SO RESULTS ARE DISPLAYED
             # =================================================
-
-            st.button(
-                f"▶️ Jump to {start_time}s",
-                key=f"jump_{i}_{start_time}",
-                on_click=jump_to_timestamp,
-                args=(start_time,),
-            )
-
-
-            st.caption(
-                f"Video evidence starts at approximately "
-                f"{start_time} seconds and ends at "
-                f"{end_time} seconds."
-            )
-
-
-    # ========================================================
-    # THIS IS THE IMPORTANT PART
-    #
-    # The video is now immediately BELOW the timestamp.
-    #
-    # We do NOT put it at the top of the page.
-    # ========================================================
-
-    st.markdown(
-        "## 🎬 Video Evidence"
-    )
-
-
-    current_time = int(
-        st.session_state.jump_time
-    )
-
-
-    st.video(
-        st.session_state.video_data,
-        format="video/mp4",
-        start_time=current_time,
-    )
-
-
-    # ========================================================
-    # SHOW CURRENT TIMESTAMP
-    # ========================================================
-
-    if current_time > 0:
-
-        st.success(
-            f"🎯 Video opened at approximately "
-            f"{current_time} seconds."
-        )
-
-
-        # ----------------------------------------------------
-        # RETURN TO BEGINNING
-        # ----------------------------------------------------
-
-        if st.button(
-            "↩️ Return Video to Beginning",
-            key="return_video",
-        ):
-
-            st.session_state.jump_time = 0
 
             st.rerun()
 
 
     # ========================================================
-    # RELATED KEYFRAME
+    # DISPLAY STORED ANSWER
     # ========================================================
 
-    records = (
-        st.session_state.multimodal_records
-    )
-
-
-    related_keyframe = None
-
-
-    if records and evidence_segments:
-
-        target_time = float(
-            evidence_segments[0]["start"]
-        )
-
-
-        closest_distance = float(
-            "inf"
-        )
-
-
-        for record in records:
-
-            try:
-
-                record_time = float(
-                    record["timestamp"]
-                )
-
-
-                distance = abs(
-                    record_time - target_time
-                )
-
-
-                if distance < closest_distance:
-
-                    closest_distance = distance
-
-                    related_keyframe = record
-
-
-            except (
-                KeyError,
-                ValueError,
-                TypeError,
-            ):
-
-                continue
-
-
-    # ========================================================
-    # KEYFRAME
-    # ========================================================
-
-    if related_keyframe:
+    if (
+        st.session_state.last_answer
+        is not None
+    ):
 
         st.markdown(
-            "## 🖼️ Related Keyframe"
-        )
-
-
-        if os.path.exists(
-            related_keyframe["image_path"]
-        ):
-
-            st.image(
-                related_keyframe["image_path"],
-                caption=(
-                    "Keyframe at "
-                    f"{related_keyframe['timestamp']} "
-                    "seconds"
-                ),
-                use_container_width=True,
-            )
-
-
-        st.markdown(
-            "### 📝 Related Transcript"
+            "## 🧠 Answer"
         )
 
 
         st.write(
-            related_keyframe["transcript_text"]
+            st.session_state.last_answer
         )
+
+
+        answer = (
+            st.session_state.last_answer
+        )
+
+
+        # ====================================================
+        # NO ANSWER / NO INFORMATION
+        # ====================================================
+
+        if (
+            "don't have enough information"
+            in answer.lower()
+        ):
+
+            st.markdown(
+                "## ⏱️ Relevant Timestamps"
+            )
+
+            st.info(
+                "No relevant information "
+                "was found in the video."
+            )
+
+
+        # ====================================================
+        # DISPLAY EVIDENCE
+        # ====================================================
+
+        else:
+
+            evidence_segments = (
+                st.session_state.last_evidence_segments
+            )
+
+
+            st.markdown(
+                "## ⏱️ Relevant Timestamps"
+            )
+
+
+            if not evidence_segments:
+
+                st.info(
+                    "No precise evidence "
+                    "segment was found."
+                )
+
+
+            else:
+
+                for segment in evidence_segments:
+
+                    start_time = int(
+                        segment["start"]
+                    )
+
+                    end_time = int(
+                        segment["end"]
+                    )
+
+
+                    # ----------------------------------------
+                    # TIMESTAMP
+                    # ----------------------------------------
+
+                    st.markdown(
+                        f"### ⏱️ "
+                        f"[{segment['start']:.1f}s - "
+                        f"{segment['end']:.1f}s]"
+                    )
+
+
+                    # ----------------------------------------
+                    # TRANSCRIPT EVIDENCE
+                    # ----------------------------------------
+
+                    st.write(
+                        segment["text"]
+                    )
+
+
+                    # ----------------------------------------
+                    # JUMP BUTTON
+                    # ----------------------------------------
+
+                    if st.button(
+                        f"▶️ Jump to {start_time}s",
+                        key=(
+                            f"jump_"
+                            f"{start_time}"
+                        )
+                    ):
+
+                        # THIS IS THE IMPORTANT PART
+                        st.session_state.jump_time = (
+                            start_time
+                        )
+
+                        # Command the browser to seek the real
+                        # <video> element (sent at the end of
+                        # the script, after the player exists).
+                        st.session_state.seek_counter += 1
+
+                        st.session_state.seek_request = {
+                            "time": start_time,
+                            "id": st.session_state.seek_counter,
+                        }
+
+                        st.rerun()
+
+
+                    # ----------------------------------------
+                    # VIDEO EVIDENCE INFO
+                    # ----------------------------------------
+
+                    st.caption(
+                        f"Video evidence starts "
+                        f"at approximately "
+                        f"{start_time} seconds "
+                        f"and ends at "
+                        f"{end_time} seconds."
+                    )
+
+
+            # =================================================
+            # RELATED KEYFRAME
+            # =================================================
+
+            related_keyframe = (
+                st.session_state.last_related_keyframe
+            )
+
+
+            if related_keyframe:
+
+                st.markdown(
+                    "### 🖼️ Related Keyframe"
+                )
+
+
+                if os.path.exists(
+                    related_keyframe[
+                        "image_path"
+                    ]
+                ):
+
+                    st.image(
+                        related_keyframe[
+                            "image_path"
+                        ],
+                        caption=(
+                            "Keyframe at "
+                            f"{related_keyframe['timestamp']} "
+                            "seconds"
+                        ),
+                        use_container_width=True
+                    )
+
+
+                # ---------------------------------------------
+                # RELATED TRANSCRIPT
+                # ---------------------------------------------
+
+                st.markdown(
+                    "### 📝 Related Transcript"
+                )
+
+
+                st.write(
+                    related_keyframe[
+                        "transcript_text"
+                    ]
+                )
+
+
+# ============================================================
+# SEND PENDING SEEK COMMAND TO THE BROWSER
+#
+# Runs last, so the <video> element already exists on the page.
+# The request is cleared right away: it is sent exactly once per
+# click and never repeats on later reruns.
+# ============================================================
+
+if st.session_state.seek_request is not None:
+
+    request = st.session_state.seek_request
+
+    st.session_state.seek_request = None
+
+    seek_video_player(
+        request["time"],
+        request["id"]
+    )

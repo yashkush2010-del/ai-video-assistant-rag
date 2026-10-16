@@ -1,61 +1,122 @@
-from src.processing.transcriber import transcribe_audio
+"""
+Transcript chunking for the AI Video Assistant.
+
+The chunker groups Whisper timestamped segments into
+small time-based chunks while preserving their original
+start/end timestamps.
+
+This keeps the RAG pipeline timestamp-aware.
+"""
 
 
-def create_chunks(segments, chunk_size=3):
+def create_chunks(
+    segments,
+    max_duration=20.0
+):
+    """
+    Convert Whisper segments into timestamped chunks.
+
+    Parameters
+    ----------
+    segments : list
+        Whisper timestamped segments.
+
+    max_duration : float
+        Maximum approximate duration of one chunk.
+
+    Returns
+    -------
+    list
+        List of dictionaries containing:
+        start
+        end
+        text
+        segments
+    """
+
+    if not segments:
+        return []
+
     chunks = []
 
-    for i in range(0, len(segments), chunk_size):
+    current_segments = []
+    chunk_start = None
+    chunk_end = None
 
-        chunk_segments = segments[i:i + chunk_size]
+    for segment in segments:
 
-        start = chunk_segments[0]["start"]
-        end = chunk_segments[-1]["end"]
+        text = segment.get("text", "").strip()
 
-        text = " ".join(
-            segment["text"].strip()
-            for segment in chunk_segments
+        if not text:
+            continue
+
+        start = float(segment.get("start", 0.0))
+        end = float(
+            segment.get(
+                "end",
+                start
+            )
         )
 
-        chunks.append({
-            "start": start,
-            "end": end,
-            "text": text,
-            "segments": chunk_segments
-        })
+        # Start a new chunk
+        if not current_segments:
 
-    return chunks
+            current_segments = [segment]
 
+            chunk_start = start
+            chunk_end = end
 
-if __name__ == "__main__":
+            continue
 
-    audio_file = "data/audio/sample.wav"
+        proposed_duration = end - chunk_start
 
-    print("Transcribing audio...")
+        # Keep adding segments while inside
+        # the desired chunk duration.
+        if proposed_duration <= max_duration:
 
-    result = transcribe_audio(audio_file)
+            current_segments.append(segment)
+            chunk_end = end
 
-    segments = result["segments"]
+        else:
 
-    chunks = create_chunks(segments)
-
-    print("\nReal Chunks:\n")
-
-    for i, chunk in enumerate(chunks):
-
-        print(f"Chunk {i + 1}")
-        print(
-            f"Time: {chunk['start']:.2f}s - "
-            f"{chunk['end']:.2f}s"
-        )
-        print(f"Text: {chunk['text']}")
-
-        print("Original segments:")
-
-        for segment in chunk["segments"]:
-            print(
-                f"  {segment['start']:.2f}s - "
-                f"{segment['end']:.2f}s: "
-                f"{segment['text'].strip()}"
+            # Save current chunk
+            chunk_text = " ".join(
+                item.get("text", "").strip()
+                for item in current_segments
+                if item.get("text", "").strip()
             )
 
-        print()
+            if chunk_text:
+
+                chunks.append({
+                    "start": float(chunk_start),
+                    "end": float(chunk_end),
+                    "text": chunk_text,
+                    "segments": current_segments.copy()
+                })
+
+            # Start new chunk
+            current_segments = [segment]
+
+            chunk_start = start
+            chunk_end = end
+
+    # Save final chunk
+    if current_segments:
+
+        chunk_text = " ".join(
+            item.get("text", "").strip()
+            for item in current_segments
+            if item.get("text", "").strip()
+        )
+
+        if chunk_text:
+
+            chunks.append({
+                "start": float(chunk_start),
+                "end": float(chunk_end),
+                "text": chunk_text,
+                "segments": current_segments.copy()
+            })
+
+    return chunks
