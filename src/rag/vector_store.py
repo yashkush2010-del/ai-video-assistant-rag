@@ -30,7 +30,7 @@ def retrieve_chunks(
     chunks,
     query_embedding,
     k=3,
-    threshold=1.0
+    threshold=2.0
 ):
     distances, indices = search_index(
         index,

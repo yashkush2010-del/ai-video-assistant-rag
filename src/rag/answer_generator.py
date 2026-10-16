@@ -79,7 +79,11 @@ if __name__ == "__main__":
     )
 
     context = prepare_context(results)
-
+    
+    print("\n--- CONTEXT SENT TO LLM ---")
+    print(context)
+    print("---------------------------")
+    
     answer = generate_answer(
         context,
         question
