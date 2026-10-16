@@ -18,3 +18,9 @@ vector_db/
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
 .env
+
+
+data/
+__pycache__/
+*.pyc
+.venv/
