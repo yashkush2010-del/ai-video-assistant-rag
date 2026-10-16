@@ -891,7 +891,7 @@ if (
                         results,
                         answer,
                         embedding_model,
-                        max_segments=1
+                        max_segments=3
                     )
                 )
 
