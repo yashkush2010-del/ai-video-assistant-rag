@@ -27,6 +27,13 @@ from src.rag.answer_generator import (
     generate_answer
 )
 
+from src.rag.video_summary import (
+    generate_video_summary,
+    escape_markdown,
+    format_timestamp,
+    format_time_range
+)
+
 
 # ============================================================
 # PAGE CONFIGURATION
@@ -204,6 +211,27 @@ def seek_video_player(seconds, request_id):
 
 
 # ============================================================
+# JUMP REQUEST HELPER
+# ============================================================
+#
+# Performs exactly the same three state updates as the Jump
+# buttons in the evidence section. The actual seeking is done
+# by seek_video_player() at the end of the script, so every
+# Jump button shares one working seek/autoplay mechanism.
+
+def request_video_jump(start_time):
+
+    st.session_state.jump_time = start_time
+
+    st.session_state.seek_counter += 1
+
+    st.session_state.seek_request = {
+        "time": start_time,
+        "id": st.session_state.seek_counter,
+    }
+
+
+# ============================================================
 # SESSION STATE
 # ============================================================
 
@@ -248,6 +276,15 @@ if "seek_request" not in st.session_state:
 
 if "seek_counter" not in st.session_state:
     st.session_state.seek_counter = 0
+
+# Cached video summary: {"video_hash": ..., "summary": {...}}
+if "video_summary" not in st.session_state:
+    st.session_state.video_summary = None
+
+# True for one rerun after a summary Jump, so the summary
+# section stays open instead of collapsing.
+if "summary_open" not in st.session_state:
+    st.session_state.summary_open = False
 
 # Store the last question/answer so a jump rerun
 # does not remove the previous result
@@ -656,6 +693,161 @@ if st.session_state.video_data is not None:
 
 
 # ============================================================
+# VIDEO SUMMARY
+# ============================================================
+#
+# Isolated feature. The logic is in src/rag/video_summary.py.
+#
+# Every summary point uses the start, end and text of a real
+# transcript chunk (nothing is invented), and its Jump button
+# uses the same seek/autoplay mechanism as the other Jump buttons.
+
+if (
+    st.session_state.chunks is not None
+    and st.session_state.video_data is not None
+):
+
+    # --------------------------------------------------------
+    # GENERATE ONCE PER VIDEO
+    # Reused on every rerun (for example after a Jump click).
+    # --------------------------------------------------------
+    cached_summary = st.session_state.video_summary
+
+    if (
+        cached_summary is None
+        or cached_summary["video_hash"]
+        != st.session_state.video_hash
+    ):
+
+        with st.spinner(
+            "Generating video summary..."
+        ):
+
+            # A failure here must never break the rest of the app.
+            try:
+                new_summary = generate_video_summary(
+                    st.session_state.chunks,
+                    st.session_state.embedding_model
+                )
+            except Exception:
+                new_summary = {
+                    "main_topic": "",
+                    "points": [],
+                    "used_llm": False,
+                    "error": True
+                }
+
+        st.session_state.video_summary = {
+            "video_hash": st.session_state.video_hash,
+            "summary": new_summary
+        }
+
+    video_summary = (
+        st.session_state.video_summary["summary"]
+    )
+
+    # --------------------------------------------------------
+    # DISPLAY (collapsible, collapsed by default)
+    # --------------------------------------------------------
+    # A rerun would otherwise collapse the section every time a
+    # Jump button is clicked, so it is kept open for the rerun
+    # that follows a summary Jump.
+    summary_expanded = (
+        st.session_state.summary_open
+    )
+
+    st.session_state.summary_open = False
+
+    with st.expander(
+        "📋 Video Summary",
+        expanded=summary_expanded
+    ):
+
+        if not video_summary["points"]:
+
+            if video_summary.get("error"):
+                st.warning(
+                    "The video summary could not be generated."
+                )
+            else:
+                st.info(
+                    "Not enough spoken content in this "
+                    "video to build a summary."
+                )
+
+        else:
+
+            st.markdown(
+                f"**Main Topic:** "
+                f"{escape_markdown(video_summary['main_topic'])}"
+            )
+
+            total_points = len(video_summary["points"])
+
+            for number, point in enumerate(
+                video_summary["points"],
+                start=1
+            ):
+
+                start_time = int(
+                    point["start"]
+                )
+
+                # Title
+                st.markdown(
+                    f"#### {number}. "
+                    f"{escape_markdown(point['title'])}"
+                )
+
+                # One-sentence summary
+                st.markdown(
+                    escape_markdown(
+                        point["summary"]
+                    )
+                )
+
+                # Timestamp (taken from the transcript chunk),
+                # shown as minutes:seconds
+                st.markdown(
+                    f"⏱ "
+                    f"{format_time_range(point['start'], point['end'])}"
+                )
+
+                # Supporting transcript evidence
+                st.markdown(
+                    "📝 "
+                    + escape_markdown(point["text"])
+                )
+
+                # Jump button (unique key per summary point)
+                if st.button(
+                    f"▶️ Jump to {format_timestamp(point['start'])}",
+                    key=(
+                        f"summary_jump_"
+                        f"{number}_"
+                        f"{start_time}"
+                    )
+                ):
+                    request_video_jump(
+                        start_time
+                    )
+
+                    st.session_state.summary_open = True
+
+                    st.rerun()
+
+                if number < total_points:
+                    st.divider()
+
+            if not video_summary["used_llm"]:
+                st.caption(
+                    "Wording is taken directly from the "
+                    "transcript (the language model was "
+                    "not used)."
+                )
+
+
+# ============================================================
 # MULTIMODAL RECORD PREVIEW
 # ============================================================
 
@@ -891,7 +1083,7 @@ if (
                         results,
                         answer,
                         embedding_model,
-                        max_segments=3
+                        max_segments=1
                     )
                 )
 
