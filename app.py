@@ -1262,8 +1262,7 @@ if (
 
                     st.markdown(
                         f"### ⏱️ "
-                        f"[{segment['start']:.1f}s - "
-                        f"{segment['end']:.1f}s]"
+                        f"{format_time_range(segment['start'], segment['end'])}"
                     )
 
 
@@ -1281,7 +1280,7 @@ if (
                     # ----------------------------------------
 
                     if st.button(
-                        f"▶️ Jump to {start_time}s",
+                        f"▶️ Jump to {format_timestamp(segment['start'])}",
                         key=(
                             f"jump_"
                             f"{start_time}"
