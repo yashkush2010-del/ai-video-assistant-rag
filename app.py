@@ -34,6 +34,14 @@ from src.rag.video_summary import (
     format_time_range
 )
 
+from src.ingestion.youtube_loader import (
+    DEFAULT_CACHE_DIR as YOUTUBE_CACHE_DIR,
+    YouTubeError,
+    YouTubeVideoSource,
+    describe_progress,
+    fetch_youtube_video
+)
+
 
 # ============================================================
 # PAGE CONFIGURATION
@@ -286,6 +294,20 @@ if "video_summary" not in st.session_state:
 if "summary_open" not in st.session_state:
     st.session_state.summary_open = False
 
+# YouTube input: the downloaded video, which source (upload or YouTube)
+# the user used last, the last uploaded file, and the last error shown.
+if "youtube_source" not in st.session_state:
+    st.session_state.youtube_source = None
+
+if "active_source" not in st.session_state:
+    st.session_state.active_source = None
+
+if "last_upload_id" not in st.session_state:
+    st.session_state.last_upload_id = None
+
+if "youtube_error" not in st.session_state:
+    st.session_state.youtube_error = None
+
 # Store the last question/answer so a jump rerun
 # does not remove the previous result
 if "last_question" not in st.session_state:
@@ -317,12 +339,91 @@ uploaded_video = st.file_uploader(
 
 
 # ============================================================
+# YOUTUBE URL  (an alternative to the upload above)
+# ============================================================
+#
+# A YouTube link is turned into a small local video file by
+# src/ingestion/youtube_loader.py. From there it goes through exactly
+# the same processing as an uploaded video: the block below only sees
+# a "video source" with a name and some bytes.
+
+youtube_url = st.text_input(
+    "Or paste a YouTube link",
+    key="youtube_url",
+    placeholder="https://www.youtube.com/watch?v=..."
+)
+
+process_youtube = st.button(
+    "Process YouTube Video",
+    key="process_youtube"
+)
+
+# The video used is the one the user chose last: a newly uploaded
+# file, or a YouTube video that was just processed.
+upload_id = (
+    (uploaded_video.name, uploaded_video.size)
+    if uploaded_video is not None
+    else None
+)
+
+if upload_id != st.session_state.last_upload_id:
+
+    st.session_state.last_upload_id = upload_id
+
+    if upload_id is not None:
+        st.session_state.active_source = "upload"
+        st.session_state.youtube_source = None
+        st.session_state.youtube_error = None
+
+if process_youtube:
+
+    st.session_state.youtube_error = None
+
+    progress_text = st.empty()
+    progress_bar = st.progress(0.0)
+
+    def show_youtube_progress(stage, fraction=None):
+
+        text, value = describe_progress(stage, fraction)
+
+        progress_text.write(text)
+        progress_bar.progress(value)
+
+    try:
+        youtube_video = fetch_youtube_video(
+            youtube_url,
+            cache_dir=YOUTUBE_CACHE_DIR,
+            on_progress=show_youtube_progress
+        )
+
+    except YouTubeError as error:
+        st.session_state.youtube_error = error.user_message
+        progress_text.empty()
+
+    else:
+        st.session_state.youtube_source = (
+            YouTubeVideoSource(youtube_video)
+        )
+        st.session_state.active_source = "youtube"
+
+    progress_bar.empty()
+
+if st.session_state.youtube_error:
+    st.error(st.session_state.youtube_error)
+
+video_source = uploaded_video
+
+if st.session_state.active_source == "youtube":
+    video_source = st.session_state.youtube_source
+
+
+# ============================================================
 # PROCESS VIDEO
 # ============================================================
 
-if uploaded_video is not None:
+if video_source is not None:
 
-    video_data = uploaded_video.getvalue()
+    video_data = video_source.getvalue()
 
     video_hash = hashlib.md5(
         video_data
@@ -364,20 +465,28 @@ if uploaded_video is not None:
         # SAVE VIDEO
         # ----------------------------------------------------
 
-        video_path = os.path.join(
-            "data",
-            "videos",
-            uploaded_video.name
-        )
+        video_path = getattr(video_source, "path", None)
 
-        with open(
-            video_path,
-            "wb"
-        ) as file:
+        if video_path is None:
 
-            file.write(
-                video_data
+            # An uploaded file: save it under data/videos.
+            video_path = os.path.join(
+                "data",
+                "videos",
+                video_source.name
             )
+
+            with open(
+                video_path,
+                "wb"
+            ) as file:
+
+                file.write(
+                    video_data
+                )
+
+        # (A YouTube video is already on disk, in data/youtube.
+        # It is used where it is: nothing is copied.)
 
 
         # ----------------------------------------------------
@@ -392,7 +501,7 @@ if uploaded_video is not None:
 
         st.session_state.video_name = (
             os.path.splitext(
-                uploaded_video.name
+                video_source.name
             )[0]
         )
 
@@ -415,7 +524,11 @@ if uploaded_video is not None:
 
 
         st.success(
-            "Video uploaded successfully!"
+            getattr(
+                video_source,
+                "ready_message",
+                "Video uploaded successfully!"
+            )
         )
 
 
