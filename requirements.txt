@@ -4,6 +4,6 @@ faiss-cpu
 streamlit
 opencv-python
 python-dotenv
-OpenCV
 ollama
 yt-dlp
+pytest

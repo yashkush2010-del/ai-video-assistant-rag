@@ -34,6 +34,12 @@ from src.rag.video_summary import (
     format_time_range
 )
 
+from src.rag.viva import (
+    generate_viva_questions,
+    check_answer,
+    viva_score
+)
+
 from src.ingestion.youtube_loader import (
     DEFAULT_CACHE_DIR as YOUTUBE_CACHE_DIR,
     YouTubeError,
@@ -293,6 +299,17 @@ if "video_summary" not in st.session_state:
 # section stays open instead of collapsing.
 if "summary_open" not in st.session_state:
     st.session_state.summary_open = False
+
+# Viva Mode: {"video_hash": ..., "questions": [...]}, the number of
+# the current question, and the result of every checked answer.
+if "viva" not in st.session_state:
+    st.session_state.viva = None
+
+if "viva_index" not in st.session_state:
+    st.session_state.viva_index = 0
+
+if "viva_results" not in st.session_state:
+    st.session_state.viva_results = {}
 
 # YouTube input: the downloaded video, which source (upload or YouTube)
 # the user used last, the last uploaded file, and the last error shown.
@@ -957,6 +974,339 @@ if (
                     "Wording is taken directly from the "
                     "transcript (the language model was "
                     "not used)."
+                )
+
+
+# ============================================================
+# VIVA MODE
+# ============================================================
+#
+# Isolated feature. The logic is in src/rag/viva.py.
+#
+# Questions are made from the Video Summary points, so every
+# question has the real timestamps and transcript of a summary
+# point. Its Jump button uses the same seek/autoplay mechanism as
+# the other Jump buttons. Nothing above this section is changed.
+
+if (
+    st.session_state.video_summary is not None
+    and st.session_state.video_data is not None
+    and st.session_state.video_summary["video_hash"]
+    == st.session_state.video_hash
+):
+
+    viva = st.session_state.viva
+
+    # --------------------------------------------------------
+    # A NEW VIDEO STARTS A NEW VIVA
+    # --------------------------------------------------------
+    if (
+        viva is not None
+        and viva["video_hash"]
+        != st.session_state.video_hash
+    ):
+
+        viva = None
+
+        st.session_state.viva = None
+
+        st.session_state.viva_index = 0
+
+        st.session_state.viva_results = {}
+
+    # Open while a viva is running, so a rerun (Check, Next, Jump)
+    # does not collapse the section.
+    with st.expander(
+        "🎓 Viva Mode",
+        expanded=viva is not None
+    ):
+
+        # ----------------------------------------------------
+        # NOT STARTED YET
+        # ----------------------------------------------------
+        if viva is None:
+
+            st.write(
+                "Practise for a viva: answer questions about this "
+                "video and get your answers checked against the "
+                "transcript."
+            )
+
+            if st.button(
+                "🎓 Generate Viva Questions",
+                key="viva_generate"
+            ):
+
+                with st.spinner(
+                    "Generating viva questions..."
+                ):
+
+                    # A failure here must never break the rest of the app.
+                    try:
+                        questions = generate_viva_questions(
+                            st.session_state.video_summary[
+                                "summary"
+                            ]["points"],
+                            segments=st.session_state.segments,
+                            embedding_model=(
+                                st.session_state.embedding_model
+                            )
+                        )
+                        failed = False
+
+                    except Exception:
+                        questions = []
+                        failed = True
+
+                st.session_state.viva = {
+                    "video_hash": st.session_state.video_hash,
+                    "questions": questions,
+                    "attempt": 1,
+                    "error": failed
+                }
+
+                st.session_state.viva_index = 0
+
+                st.session_state.viva_results = {}
+
+                st.rerun()
+
+        # ----------------------------------------------------
+        # NO QUESTIONS
+        # ----------------------------------------------------
+        elif not viva["questions"]:
+
+            if viva.get("error"):
+                st.warning(
+                    "The viva questions could not be generated."
+                )
+            else:
+                st.info(
+                    "Not enough spoken content in this "
+                    "video to build viva questions."
+                )
+
+            if st.button(
+                "🔁 Try Again",
+                key="viva_retry"
+            ):
+
+                st.session_state.viva = None
+
+                st.rerun()
+
+        else:
+
+            questions = viva["questions"]
+
+            total_questions = len(questions)
+
+            number = st.session_state.viva_index
+
+            results = st.session_state.viva_results
+
+            # ------------------------------------------------
+            # ONE QUESTION
+            # ------------------------------------------------
+            if number < total_questions:
+
+                item = questions[number]
+
+                st.markdown(
+                    f"**Question {number + 1} of {total_questions}**"
+                )
+
+                st.markdown(
+                    f"#### {escape_markdown(item['question'])}"
+                )
+
+                # The key changes per question and per attempt, so
+                # every question starts with an empty answer box.
+                user_answer = st.text_area(
+                    "Your answer:",
+                    key=(
+                        f"viva_answer_"
+                        f"{viva['attempt']}_"
+                        f"{number}"
+                    )
+                )
+
+                if st.button(
+                    "✅ Check Answer",
+                    key=f"viva_check_{number}"
+                ):
+
+                    if not user_answer.strip():
+
+                        st.warning(
+                            "Please type an answer first."
+                        )
+
+                    else:
+
+                        # The LLM examiner can take a few seconds.
+                        with st.spinner(
+                            "Checking answer..."
+                        ):
+
+                            results[number] = check_answer(
+                                user_answer,
+                                item,
+                                st.session_state.embedding_model
+                            )
+
+                        st.rerun()
+
+                # --------------------------------------------
+                # RESULT OF THIS QUESTION
+                # --------------------------------------------
+                result = results.get(number)
+
+                if result is not None:
+
+                    feedback = escape_markdown(
+                        result["feedback"]
+                    )
+
+                    if result["verdict"] == "correct":
+                        st.success(
+                            f"✅ Correct. {feedback}"
+                        )
+                    elif result["verdict"] == "partial":
+                        st.warning(
+                            f"🟡 Partly correct. {feedback}"
+                        )
+                    else:
+                        st.error(
+                            f"❌ Incorrect. {feedback}"
+                        )
+
+                    # Expected answer
+                    st.markdown(
+                        "**Expected answer:** "
+                        + escape_markdown(item["answer"])
+                    )
+
+                    # Timestamp, shown as minutes:seconds
+                    st.markdown(
+                        f"⏱ "
+                        f"{format_time_range(item['start'], item['end'])}"
+                    )
+
+                    # Supporting transcript evidence
+                    st.markdown(
+                        "📝 "
+                        + escape_markdown(item["text"])
+                    )
+
+                    # Jump button (same mechanism as everywhere else)
+                    if st.button(
+                        f"▶️ Jump to {format_timestamp(item['start'])}",
+                        key=(
+                            f"viva_jump_"
+                            f"{number}_"
+                            f"{int(item['start'])}"
+                        )
+                    ):
+                        request_video_jump(
+                            int(item["start"])
+                        )
+
+                        st.rerun()
+
+                    next_label = (
+                        "➡️ Next Question"
+                        if number + 1 < total_questions
+                        else "🏁 Finish Viva"
+                    )
+
+                    if st.button(
+                        next_label,
+                        key=f"viva_next_{number}"
+                    ):
+
+                        st.session_state.viva_index += 1
+
+                        st.rerun()
+
+            # ------------------------------------------------
+            # FINAL SCORE
+            # ------------------------------------------------
+            else:
+
+                final = viva_score(
+                    results,
+                    total_questions
+                )
+
+                st.markdown(
+                    f"### 🏁 Final Score: "
+                    f"{final['score']:g} / {final['total']} "
+                    f"({final['percent']}%)"
+                )
+
+                verdict_icons = {
+                    "correct": "✅",
+                    "partial": "🟡",
+                    "incorrect": "❌"
+                }
+
+                for position, item in enumerate(questions):
+
+                    result = results.get(position)
+
+                    icon = (
+                        verdict_icons[result["verdict"]]
+                        if result is not None
+                        else "➖"
+                    )
+
+                    st.markdown(
+                        f"{icon} **Q{position + 1}.** "
+                        f"{escape_markdown(item['question'])} "
+                        f"(⏱ {format_timestamp(item['start'])})"
+                    )
+
+                restart_column, new_column = st.columns(2)
+
+                with restart_column:
+
+                    if st.button(
+                        "🔁 Restart Viva",
+                        key="viva_restart"
+                    ):
+
+                        viva["attempt"] += 1
+
+                        st.session_state.viva_index = 0
+
+                        st.session_state.viva_results = {}
+
+                        st.rerun()
+
+                with new_column:
+
+                    if st.button(
+                        "🆕 New Questions",
+                        key="viva_new"
+                    ):
+
+                        st.session_state.viva = None
+
+                        st.session_state.viva_index = 0
+
+                        st.session_state.viva_results = {}
+
+                        st.rerun()
+
+            if any(
+                item["source"] == "transcript"
+                for item in questions
+            ):
+                st.caption(
+                    "Some questions use a simple form because the "
+                    "language model was not available or its wording "
+                    "was not supported by the transcript."
                 )
 
 
