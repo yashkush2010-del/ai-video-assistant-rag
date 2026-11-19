@@ -1207,27 +1207,48 @@ def answer_first_llm(question_reply, answer_first_reply):
 
 
 def test_a_vague_question_is_replaced_by_an_answer_first_question():
+    # (Changed expectation, round 3: the answer-first passage is now the
+    # focused 1-2 sentences about the clusters, not the first ~320
+    # characters of the section. Uses the REAL Whisper transcript, whose
+    # cluster sentence is clearly the most informative one.)
     llm = answer_first_llm(
         # step 1: a yes/no question - rejected
         "QUESTION: Does the machine find clusters of players?\n"
         "ANSWER: Yes, it finds two clusters.",
-        # step 2: a specific question for the real passage
-        "QUESTION: How does the machine group the cricket players by "
+        # step 2: a specific question for the focused passage
+        "QUESTION: How are the players divided into the two clusters by "
         "their runs and wickets?"
     )
 
-    item = generate_viva_questions([CRICKET_POINT], llm=llm)[0]
+    item = generate_viva_questions([REAL_CRICKET_POINT], llm=llm)[0]
 
     assert item["source"] == "llm_answer_first"
     assert item["question"] == (
-        "How does the machine group the cricket players by their runs "
+        "How are the players divided into the two clusters by their runs "
         "and wickets?"
     )
     assert "types of players" not in item["question"].lower()
 
-    # the answer is real transcript, starting with a complete sentence
-    assert item["answer"] in CRICKET_TEXT
-    assert item["answer"].startswith("Suppose you have a cricket dataset")
+    # the answer is real transcript: the cluster sentences
+    assert item["answer"].startswith("The one cluster are the players")
+    assert viva._comparable(item["answer"]) in viva._comparable(
+        REAL_CRICKET_POINT["text"]
+    )
+
+
+def test_an_answer_first_question_must_fit_the_focused_passage():
+    # Written for the OLD wide passage ("Suppose you have a cricket
+    # dataset ..."): the focused cluster passage does not answer it.
+    llm = answer_first_llm(
+        "QUESTION: Does the machine find clusters of players?\n"
+        "ANSWER: Yes, it finds two clusters.",
+        "QUESTION: How does the machine group the cricket players by "
+        "their runs and wickets?"
+    )
+
+    item = generate_viva_questions([REAL_CRICKET_POINT], llm=llm)[0]
+
+    assert item["source"] == "transcript"
 
 
 def test_an_answer_first_question_is_checked_too():
@@ -1800,3 +1821,294 @@ def test_every_real_timestamp_is_a_whisper_segment_inside_its_section():
         assert any(s["start"] == item["start"] for s in segments)
         assert any(s["end"] == item["end"] for s in segments)
         assert item["section_start"] <= item["start"] < item["end"] <= item["section_end"]
+
+
+# ============================================================
+# ROUND 3: SHORT ANSWERS AND FOCUSED ANSWER-FIRST PASSAGES
+# ============================================================
+
+REAL_PAUL_QUESTION = {
+    "question": "What does Paul love listening to?",
+    "answer": "He loves listening to new songs.",
+    "kind": "concept",
+    "start": 23.6,
+    "end": 27.6,
+    "text": "So that's Paul. He loves listening to new songs.",
+    "section_start": 17.6,
+    "section_end": 31.0,
+    "section_text": REAL_PAUL_POINT["text"],
+    "title": "Basics of Machine Learning",
+    "source": "llm_answer_first",
+}
+
+REAL_TYPES_QUESTION = {
+    "question": "What happens to the model when there is more data?",
+    "answer": "More the data, better the model, higher will be the accuracy.",
+    "kind": "concept",
+    "start": 159.2,
+    "end": 163.2,
+    "text": "More the data, better the model, higher will be the accuracy.",
+    "section_start": 159.2,
+    "section_end": 181.0,
+    "section_text": REAL_TYPES_POINT["text"],
+    "title": "Types of Machine Learning",
+    "source": "llm_answer_first",
+}
+
+# The three short answers llama3.2 marked fully correct on the real run.
+REAL_VAGUE_ANSWERS = [
+    ("It is about the songs Paul likes.", REAL_PAUL_QUESTION, 0.35),
+    ("The model learns from data.", REAL_TYPES_QUESTION, 0.75),
+    ("It learns from rewards.", REAL_RL_QUESTION, 0.63),
+]
+
+
+# ---- the cap only turns CORRECT into PARTIAL ---------------------------
+
+@pytest.mark.parametrize("answer, item, similarity", REAL_VAGUE_ANSWERS)
+def test_real_vague_answers_are_capped_at_partial(monkeypatch, answer, item, similarity):
+    with_similarity(monkeypatch, similarity)
+
+    # (EXAMPLE, so no other rule lowers the verdict first: the cap is
+    # what is tested here)
+    result = check_answer(
+        answer, item, FakeEmbedder(),
+        llm=examiner("CORRECT", "EXAMPLE")
+    )
+
+    assert result["verdict"] == "partial"
+    assert result["kind"] == "too_brief"
+    assert "too brief" in result["feedback"]
+
+
+def test_the_cap_never_raises_an_incorrect_verdict(monkeypatch):
+    with_similarity(monkeypatch, 0.50)
+
+    result = check_answer(
+        "It learns from rewards.", REAL_RL_QUESTION, FakeEmbedder(),
+        llm=fixed_llm("VERDICT: INCORRECT\nTYPE: WRONG\nCONTRADICTS: NO\nMISSING: NONE")
+    )
+
+    assert result["verdict"] == "incorrect"
+
+
+def test_the_cap_leaves_a_partial_verdict_alone(monkeypatch):
+    with_similarity(monkeypatch, 0.50)
+
+    result = check_answer(
+        "It learns from rewards.", REAL_RL_QUESTION, FakeEmbedder(),
+        llm=examiner("PARTIAL", "INCOMPLETE")
+    )
+
+    assert result["verdict"] == "partial"
+    assert result["kind"] == "partial"
+
+
+@pytest.mark.parametrize("answer", ["Paris.", "I like cricket.", "Cats."])
+def test_short_unrelated_answers_stay_incorrect(answer):
+    llm = examiner("CORRECT", "CONCEPT")
+
+    result = check_answer(answer, REAL_RL_QUESTION, FakeEmbedder(), llm=llm)
+
+    assert result["verdict"] == "incorrect"
+    assert result["kind"] == "off_topic"
+    assert llm.calls == []
+
+
+def test_a_short_contradicting_answer_is_never_correct(monkeypatch):
+    # Even if the LLM wrongly says CORRECT.
+    with_similarity(monkeypatch, 0.60)
+
+    result = check_answer(
+        "Not feedback, never.", REAL_RL_QUESTION, FakeEmbedder(),
+        llm=examiner("CORRECT", "CONCEPT")
+    )
+
+    assert result["verdict"] != "correct"
+
+
+# ---- complete answers are not affected ---------------------------------
+
+@pytest.mark.parametrize("answer, item, answer_type", [
+    (REWARDS_AND_PENALTIES, REAL_RL_QUESTION, "EXAMPLE"),
+    (CRICKET_CLUSTERS, REAL_CRICKET_QUESTION, "EXAMPLE"),
+    (DEFINITION, COINS_QUESTION, "CONCEPT"),
+    ("Paul loves listening to new songs and either likes or dislikes them.",
+     REAL_PAUL_QUESTION, "EXAMPLE"),
+])
+def test_valid_complete_answers_stay_correct(answer, item, answer_type):
+    result = check_answer(
+        answer, item, FakeEmbedder(),
+        llm=examiner("CORRECT", answer_type)
+    )
+
+    assert result["verdict"] == "correct"
+
+
+# ---- the exception: the video's own short answer -----------------------
+
+def test_the_videos_own_short_answer_stays_correct(monkeypatch):
+    # "Feedback." names the expected answer's only key word and is
+    # similar in meaning to "It works on the principle of feedback."
+    with_similarity(monkeypatch, 0.55)
+
+    result = check_answer(
+        "Feedback.", REAL_RL_QUESTION, FakeEmbedder(),
+        llm=examiner("CORRECT", "CONCEPT")
+    )
+
+    assert result["verdict"] == "correct"
+
+
+@pytest.mark.parametrize("similarity, coverage, contradiction, own", [
+    (0.95, 0.0, None, True),         # meaning practically identical
+    (0.55, 1.0, None, True),         # all key words AND similar meaning
+    (0.30, 1.0, None, False),        # key words but not the same meaning
+    (0.60, 0.5, None, False),        # similar but incomplete
+    (0.95, 1.0, "negation", False),  # a contradiction always fails
+])
+def test_the_exception_needs_meaning_and_no_contradiction(similarity, coverage, contradiction, own):
+    assert viva._is_videos_own_answer(similarity, coverage, contradiction) is own
+
+
+# ---- counting meaningful words -------------------------------------------
+
+@pytest.mark.parametrize("answer, too_brief", [
+    ("data data data data model model", True),           # 2 different words
+    ("So basically it is the data that we saw.", True),  # filler and stop words
+    ("It learns from rewards.", True),
+    ("The model learns from data.", True),
+    ("Supervised learning trains a model on labeled data.", False),
+    (REWARDS_AND_PENALTIES, False),
+])
+def test_only_different_meaningful_words_are_counted(answer, too_brief):
+    assert viva._is_too_brief(answer) is too_brief
+
+
+# ---- without Ollama: unchanged -------------------------------------------
+
+def test_without_ollama_grading_is_unchanged(monkeypatch):
+    # Safeguard: the no-Ollama path keeps its existing behaviour; the
+    # brevity cap only applies to the LLM examiner's verdicts.
+    with_similarity(monkeypatch, 0.75)
+
+    result = check_answer(
+        "The model learns from data.", REAL_TYPES_QUESTION, FakeEmbedder(),
+        llm=broken_llm
+    )
+
+    assert result["verdict"] == "correct"
+    assert result["judged_by"] == "similarity"
+
+
+# ---- focused answer-first passages ---------------------------------------
+
+def test_real_paul_passage_is_its_informative_sentences():
+    # (the filler before it - "It's also about understanding and
+    # reasoning.", "So today we will learn ...", "So that's Paul." - is
+    # left out)
+    assert viva._focused_passage(REAL_PAUL_POINT["text"]) == (
+        "He loves listening to new songs. "
+        "He either likes them or dislikes them."
+    )
+
+
+def test_real_cricket_passage_is_about_the_clusters():
+    passage = viva._focused_passage(REAL_CRICKET_POINT["text"])
+
+    assert passage.startswith("The one cluster are the players")
+    assert len(viva._split_sentences(passage)) <= viva.MAX_FOCUSED_SENTENCES
+
+
+def test_real_types_passage_does_not_run_into_the_coins_example():
+    passage = viva._focused_passage(REAL_TYPES_POINT["text"])
+
+    assert "Suppose" not in passage
+    assert "coins" not in passage
+    assert "Let's first quickly" not in passage
+
+
+def test_focused_passages_are_consecutive_real_transcript():
+    for point in (REAL_PAUL_POINT, REAL_TYPES_POINT, REAL_CRICKET_POINT, REAL_RL_POINT):
+        passage = viva._focused_passage(point["text"])
+
+        assert passage
+        assert viva._comparable(passage) in viva._comparable(point["text"])
+        assert len(viva._split_sentences(passage)) <= viva.MAX_FOCUSED_SENTENCES
+
+        for sentence in viva._split_sentences(passage):
+            assert viva._is_informative(sentence)
+
+
+def test_the_answer_first_prompt_gets_only_the_focused_passage():
+    llm = answer_first_llm(
+        "QUESTION: Does the machine find clusters?\nANSWER: Yes.",
+        ""
+    )
+
+    generate_viva_questions([REAL_TYPES_POINT], llm=llm)
+
+    prompt = next(call for call in llm.calls if "Passage:" in call)
+
+    assert "coins" not in prompt
+    assert "Let's first quickly" not in prompt
+
+
+# ---- exact timestamps, or the whole section --------------------------------
+
+def cricket_answer_first_llm():
+    return answer_first_llm(
+        "QUESTION: Does the machine find clusters of players?\n"
+        "ANSWER: Yes, it finds two clusters.",
+        "QUESTION: How are the players divided into the two clusters by "
+        "their runs and wickets?"
+    )
+
+
+def test_an_answer_first_passage_gets_its_exact_timestamp():
+    item = generate_viva_questions(
+        [REAL_CRICKET_POINT],
+        llm=cricket_answer_first_llm(),
+        segments=REAL_CRICKET_SEGMENTS,
+        embedding_model=FakeEmbedder()
+    )[0]
+
+    assert item["source"] == "llm_answer_first"
+    assert item["start"] == 248.4      # 4:08, "The one cluster ..."
+    assert item["end"] == 262.2        # end of "... batsmen and bowlers."
+
+
+def test_an_unmatched_passage_keeps_the_whole_section():
+    # Whisper's segments say something slightly different from the point
+    # text: the passage cannot be found word for word, so no position is
+    # guessed - the question keeps its whole section.
+    different = [
+        dict(segment, text=segment["text"].replace("cluster", "group"))
+        for segment in REAL_CRICKET_SEGMENTS
+    ]
+
+    item = generate_viva_questions(
+        [REAL_CRICKET_POINT],
+        llm=cricket_answer_first_llm(),
+        segments=different,
+        embedding_model=FakeEmbedder()
+    )[0]
+
+    assert item["source"] == "llm_answer_first"
+    assert item["start"] == REAL_CRICKET_POINT["start"]
+    assert item["end"] == REAL_CRICKET_POINT["end"]
+
+
+def test_without_ollama_questions_are_unchanged():
+    # The simple fallback (step 3) is untouched by round 3.
+    expected = {
+        "Basics of Machine Learning": "He loves listening to new songs.",
+        "Types of Machine Learning": "It could be either supervised learning or reinforcement learning.",
+        "Principle System": "Or we can say that it works on the principle of feedback.",
+    }
+
+    for point in (REAL_PAUL_POINT, REAL_TYPES_POINT, REAL_RL_POINT):
+        item = generate_viva_questions([point], llm=broken_llm)[0]
+
+        assert item["source"] == "transcript"
+        assert item["answer"] == expected[point["title"]]

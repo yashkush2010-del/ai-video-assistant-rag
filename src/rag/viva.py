@@ -154,6 +154,14 @@ MIN_REFERENCE_WORDS = 6
 # never be marked correct by the LLM.
 MIN_TOPIC_WORDS = 2
 
+# A complete answer needs at least this many DIFFERENT meaningful words
+# (stop words and filler removed, each word counted once). Found on the
+# real video: llama3.2 accepted "It learns from rewards." (2 words) and
+# "The model learns from data." (3) as fully correct. Such an answer can
+# be PARTIAL at best - unless it is the video's own answer ("Feedback."
+# for "What principle does reinforcement learning work on?").
+MIN_COMPLETE_ANSWER_WORDS = 4
+
 # Points per verdict, used for the final score.
 VERDICT_SCORES = {
     "correct": 1.0,
@@ -699,6 +707,62 @@ def _most_informative_sentence(text, question):
     return best
 
 
+# At most this many consecutive sentences in an answer-first passage.
+MAX_FOCUSED_SENTENCES = 2
+
+
+def _focused_passage(text):
+    """
+    The passage for "answer first": ONE point of the section, as 1-2
+    CONSECUTIVE informative sentences of the real transcript.
+
+    Found on the real video: a passage of up to ~320 characters mixed
+    several points (accuracy, the types of learning AND the coins
+    example), so llama3.2 wrote questions the passage did not really
+    answer ("What influences his preference for new songs?").
+
+    The most informative sentence is chosen (a sentence that states an
+    idea beats an example sentence), and the sentence right after it is
+    added only if it is informative too and the passage stays readable.
+    Because the sentences are consecutive, the passage can be found word
+    for word in the Whisper segments, so its timestamp is exact.
+    """
+    sentences = _split_sentences(text)
+
+    best = None
+    best_score = None
+
+    for position, sentence in enumerate(sentences):
+
+        if not _is_informative(sentence):
+            continue
+
+        states_idea = 0 if _EXAMPLE_MARKERS.search(sentence) else 1
+        score = (states_idea, len(_key_words(sentence)))
+
+        # ties: the earlier sentence
+        if best_score is None or score > best_score:
+            best, best_score = position, score
+
+    if best is None:
+        return ""
+
+    chosen = [sentences[best]]
+
+    for following in sentences[best + 1:best + MAX_FOCUSED_SENTENCES]:
+        longer = " ".join(chosen + [following])
+
+        if (
+            not _is_informative(following)
+            or len(longer) > MAX_PASSAGE_CHARS
+        ):
+            break
+
+        chosen.append(following)
+
+    return " ".join(chosen)
+
+
 def _passage_kind(passage):
     return "example" if _EXAMPLE_MARKERS.search(passage) else "concept"
 
@@ -877,11 +941,21 @@ def _locate_text(answer, texts):
     return None
 
 
-def _focus_on_answer(item, segments, embedding_model):
+# How the timestamp of a question is found inside its section.
+FOCUS_BEST = "best"              # exact text, else the most similar segment
+FOCUS_EXACT_ONLY = "exact_only"  # exact text, else the WHOLE section
+FOCUS_NONE = "none"              # the whole section
+
+
+def _focus_on_answer(item, segments, embedding_model, exact_only=False):
     """
     Move start, end and text of a question onto the Whisper segment(s)
     of its section that hold the expected answer. Changes nothing when
     the section has fewer than two segments or the search fails.
+
+    exact_only: only the exact place of the answer's text is used; if it
+    cannot be found word for word, the whole section is kept (never a
+    guessed position).
     """
     inside = _segments_in_section(
         segments,
@@ -907,6 +981,9 @@ def _focus_on_answer(item, segments, embedding_model):
         item["end"] = float(inside[last]["end"])
         item["text"] = " ".join(texts[first:last + 1])
 
+        return
+
+    if exact_only:
         return
 
     try:
@@ -948,7 +1025,8 @@ def _focus_on_answer(item, segments, embedding_model):
 def _question_for_point(point, number, kind, llm, state):
     """
     The three steps (see the module docstring).
-    Returns (question, answer, kind, source, whole_section) or None.
+    Returns (question, answer, kind, source, focus) or None;
+    focus says how the timestamp is found (see FOCUS_... below).
     """
     text = str(point.get("text", "")).strip()
     title = point.get("title", "")
@@ -975,7 +1053,7 @@ def _question_for_point(point, number, kind, llm, state):
         )
 
         if problem is None:
-            return question, answer, kind, "llm", False
+            return question, answer, kind, "llm", FOCUS_BEST
 
         log.warning(
             "Viva question %d (%s): LLM question not used - %s",
@@ -983,15 +1061,18 @@ def _question_for_point(point, number, kind, llm, state):
         )
 
     # ---- 2) answer first: real transcript, LLM writes the question --
+    focused = _focused_passage(text)
+
+    # (the wider passage is still the last resort of step 3)
     passage = _passage(text)
 
     if not passage:
         return None
 
-    if raw is not None:
+    if raw is not None and focused:
         raw_question = _call_llm(
             llm,
-            ANSWER_FIRST_PROMPT.replace("__PASSAGE__", passage),
+            ANSWER_FIRST_PROMPT.replace("__PASSAGE__", focused),
             state
         )
 
@@ -1001,14 +1082,16 @@ def _question_for_point(point, number, kind, llm, state):
             )
 
             problem = (
-                _question_problem(question, passage)
-                or _answer_problem(passage, question, text)
+                _question_problem(question, focused)
+                or _answer_problem(focused, question, text)
             )
 
             if problem is None:
+                # Timestamp: the exact place of the passage, or else the
+                # whole section - never a guessed position.
                 return (
-                    question, passage, _passage_kind(passage),
-                    "llm_answer_first", True
+                    question, focused, _passage_kind(focused),
+                    "llm_answer_first", FOCUS_EXACT_ONLY
                 )
 
             log.warning(
@@ -1037,10 +1120,10 @@ def _question_for_point(point, number, kind, llm, state):
         _most_informative_sentence(text, question),
     ):
         if sentence and _answer_problem(sentence, question, text) is None:
-            return question, sentence, "concept", "transcript", False
+            return question, sentence, "concept", "transcript", FOCUS_BEST
 
     if _answer_problem(passage, question, text) is None:
-        return question, passage, "concept", "transcript", True
+        return question, passage, "concept", "transcript", FOCUS_NONE
 
     return None
 
@@ -1127,7 +1210,7 @@ def generate_viva_questions(
             )
             continue
 
-        question, answer, kind, source, whole_section = made
+        question, answer, kind, source, focus = made
 
         # Skip a question that repeats an earlier one.
         words = _stem_set(question)
@@ -1161,9 +1244,14 @@ def generate_viva_questions(
         if (
             segments
             and embedding_model is not None
-            and not whole_section
+            and focus != FOCUS_NONE
         ):
-            _focus_on_answer(item, segments, embedding_model)
+            _focus_on_answer(
+                item,
+                segments,
+                embedding_model,
+                exact_only=(focus == FOCUS_EXACT_ONLY)
+            )
 
         questions.append(item)
 
@@ -1439,6 +1527,36 @@ def _contradiction(user_answer, item):
     return None
 
 
+def _is_too_brief(user_answer):
+    """
+    Fewer than MIN_COMPLETE_ANSWER_WORDS different meaningful words.
+    _key_words() removes stop words and filler and returns a SET, so a
+    repeated word counts once ("data data data" is one word).
+    """
+    return len(_key_words(user_answer)) < MIN_COMPLETE_ANSWER_WORDS
+
+
+def _is_videos_own_answer(similarity_expected, coverage, contradiction):
+    """
+    The exception to the brevity cap: a short answer that IS the video's
+    answer. Both must hold:
+      - semantically equivalent to the expected answer: MiniLM similarity
+        with it is very high, or it names all of the expected answer's
+        key words AND is still clearly similar in meaning to it,
+      - no contradiction (no opposite word, no added negation).
+    """
+    if contradiction is not None:
+        return False
+
+    return (
+        similarity_expected >= VERBATIM_SIMILARITY
+        or (
+            coverage >= VERBATIM_COVERAGE
+            and similarity_expected >= PARTIAL_SIMILARITY
+        )
+    )
+
+
 def _grounded_missing_concept(missing, item):
     """The LLM's missing idea, only if the video really says it."""
     if not missing:
@@ -1468,6 +1586,9 @@ def _grounded_missing_concept(missing, item):
 # ============================================================
 
 FEEDBACK = {
+    "too_brief": (
+        "Your answer is correct but too brief. Explain it a little more."
+    ),
     "video": "Your answer matches what the video says.",
     "concept": (
         "Your answer is a correct explanation of the idea. The video "
@@ -1695,6 +1816,19 @@ def check_answer(user_answer, item, embedding_model, llm=None):
             final, kind = "partial", "partial"
         else:
             final, kind = "incorrect", "incorrect"
+
+    # ---- 4) brevity cap ----------------------------------------------
+    # Runs LAST, after the relevance gate (unrelated answers never get
+    # here) and after all the grading and contradiction rules above. It
+    # can only turn a CORRECT into PARTIAL; it never raises a verdict.
+    if (
+        final == "correct"
+        and _is_too_brief(user_answer)
+        and not _is_videos_own_answer(
+            similarity_expected, coverage, contradiction
+        )
+    ):
+        final, kind = "partial", "too_brief"
 
     feedback = FEEDBACK[kind]
 

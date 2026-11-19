@@ -57,7 +57,8 @@ from src.rag import viva  # noqa: E402
 #
 # A question is matched to a case by topic words in the question and
 # its section. "valid" is a correct answer in DIFFERENT words from the
-# video; "partial" is on topic but incomplete.
+# video; "partial" is on topic but incomplete; "vague" (optional) is too
+# vague to count and must be rejected.
 
 CASES = [
     {
@@ -77,7 +78,9 @@ CASES = [
             "labels: players with many runs and few wickets, and players "
             "with few runs but many wickets."
         ),
-        "partial": "It puts the players into groups.",
+        "partial": "The machine finds two clusters of players.",
+        # must stay rejected (too vague: one topic word)
+        "vague": "It puts the players into groups.",
     },
     {
         "name": "reinforcement learning",
@@ -283,6 +286,9 @@ def main():
             out(f"  Case     : {case['name']}")
             tests.append(("valid", case["valid"], "correct"))
             tests.append(("partial", case["partial"], "partial"))
+
+            if case.get("vague"):
+                tests.append(("vague", case["vague"], "incorrect"))
         else:
             out("  Case     : (no prepared case; using the expected answer)")
             tests.append(("expected", item["answer"], "correct"))
