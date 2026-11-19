@@ -273,8 +273,11 @@ def main():
         )
         out(f"  Evidence : {item['text']}")
 
+        # (a fill-in-the-blank answer is a phrase: check its sentence)
         answers_question = viva._answer_problem(
-            item["answer"], item["question"], item["section_text"]
+            item.get("answer_sentence") or item["answer"],
+            item["question"],
+            item["section_text"]
         )
         inside = item["section_start"] <= item["start"] <= item["end"] <= item["section_end"]
 
@@ -282,7 +285,14 @@ def main():
 
         tests = []
 
-        if case:
+        if item["source"] == "transcript_blank":
+            # A fill-in-the-blank question: the prepared explanations do
+            # not fit it; its own transcript phrase must be accepted.
+            out(f"  Sentence : {item['answer_sentence']}")
+            out("  Case     : (fill in the blank; using its own answer)")
+            tests.append(("blank", item["answer"], "correct"))
+
+        elif case:
             out(f"  Case     : {case['name']}")
             tests.append(("valid", case["valid"], "correct"))
             tests.append(("partial", case["partial"], "partial"))

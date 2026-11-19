@@ -70,6 +70,17 @@ def no_real_ollama(monkeypatch):
     monkeypatch.setattr(viva, "_judge_llm", broken_llm)
 
 
+# Round 4: when the LLM's own question is not used, the question now
+# comes from the one-sentence LLM step or is a fill-in-the-blank question
+# (before: the broad "What does the video explain about ...?" form).
+FALLBACK_SOURCES = ("llm_answer_sentence", "transcript_blank", "transcript")
+
+
+def answer_sentence(item):
+    """The transcript sentence of a question (whole sentence of a blank)."""
+    return item.get("answer_sentence") or item["answer"]
+
+
 def assert_llm_pair_not_used(item, rejected_text):
     """The LLM's own question/answer pair was rejected and not shown."""
     assert item["source"] != "llm"
@@ -229,7 +240,7 @@ def test_a_question_that_assumes_what_the_video_does_not_say_is_rejected():
 
     item = generate_viva_questions([PAUL_POINT], llm=llm)[0]
 
-    assert item["source"] == "transcript"
+    assert item["source"] in FALLBACK_SOURCES
 
 
 @pytest.mark.parametrize("question", [
@@ -272,7 +283,7 @@ def test_yes_no_questions_are_rejected(question):
 
     item = generate_viva_questions([PAUL_POINT], llm=llm)[0]
 
-    assert item["source"] == "transcript"
+    assert item["source"] in FALLBACK_SOURCES
 
 
 def test_a_question_starting_with_a_similar_word_is_not_yes_no():
@@ -296,9 +307,9 @@ def test_a_question_starting_with_a_similar_word_is_not_yes_no():
 def test_the_fallback_question_reads_naturally(title, topic):
     point = dict(POINTS[0], title=title)
 
-    item = generate_viva_questions([point], llm=broken_llm)[0]
-
-    assert item["question"] == f"What does the video explain about {topic}?"
+    assert viva._fallback_question(point) == (
+        f"What does the video explain about {topic}?"
+    )
 
 
 def test_a_question_with_two_new_words_is_kept():
@@ -320,7 +331,7 @@ def test_a_question_about_the_transcript_is_rejected():
 
     item = generate_viva_questions([PAUL_POINT], llm=llm)[0]
 
-    assert item["source"] == "transcript"
+    assert item["source"] in FALLBACK_SOURCES
 
 
 def test_a_direct_answer_about_paul_is_kept():
@@ -464,7 +475,8 @@ def test_a_transcript_answer_is_located_without_the_embedding_model():
     )[0]
 
     # "He loves listening to new songs." is found word for word
-    assert item["answer"] == "He loves listening to new songs."
+    assert answer_sentence(item) == "He loves listening to new songs."
+    assert item["answer"] == "new songs"
     assert item["start"] == 26.0
     assert item["end"] == 28.5
 
@@ -498,7 +510,7 @@ def test_a_question_without_a_question_mark_is_rejected():
 
     item = generate_viva_questions(POINTS[:1], llm=llm)[0]
 
-    assert item["source"] == "transcript"
+    assert item["source"] in FALLBACK_SOURCES
 
 
 def test_unformatted_llm_output_falls_back_to_a_plain_question():
@@ -506,15 +518,15 @@ def test_unformatted_llm_output_falls_back_to_a_plain_question():
 
     item = generate_viva_questions(POINTS[:1], llm=llm)[0]
 
-    assert item["source"] == "transcript"
-    assert item["answer"] == POINTS[0]["summary"]
+    assert item["source"] in FALLBACK_SOURCES
+    assert "great question" not in item["question"]
 
 
 def test_without_ollama_every_point_still_gets_a_question():
     questions = generate_viva_questions(POINTS, llm=broken_llm)
 
     assert len(questions) == 2
-    assert all(item["source"] == "transcript" for item in questions)
+    assert all(item["source"] in FALLBACK_SOURCES for item in questions)
 
 
 def test_the_llm_is_not_retried_after_a_failure():
@@ -574,9 +586,21 @@ def test_the_number_of_questions_is_limited():
         "Neural Networks", "Decision Trees", "Embeddings", "Evaluation",
     ]
 
+    sentences = [
+        "Regression predicts house prices from the size of each house.",
+        "Classification sorts incoming emails into spam and normal mail.",
+        "Clustering groups customers by their shopping habits.",
+        "Overfitting memorises training noise and fails on new data.",
+        "Neural networks stack many layers of simple neurons.",
+        "Decision trees split the data with yes or no conditions.",
+        "Embeddings turn words into vectors of real numbers.",
+        "Evaluation measures accuracy on a separate test set.",
+    ]
+
     points = [
-        dict(POINTS[0], title=topic, start=float(i * 30))
-        for i, topic in enumerate(topics)
+        dict(POINTS[0], title=topic, text=sentence, summary=sentence,
+             start=float(i * 30))
+        for i, (topic, sentence) in enumerate(zip(topics, sentences))
     ]
 
     questions = generate_viva_questions(
@@ -1137,21 +1161,21 @@ COINS_POINT = {
 def test_a_fragment_is_never_an_expected_answer():
     item = generate_viva_questions([CRICKET_POINT], llm=broken_llm)[0]
 
-    assert not item["answer"].startswith("While")
-    assert item["answer"] in CRICKET_TEXT
-    assert item["source"] == "transcript"
+    assert not answer_sentence(item).startswith("While")
+    assert viva._comparable(answer_sentence(item)) in viva._comparable(CRICKET_TEXT)
+    assert item["source"] in FALLBACK_SOURCES
 
 
 def test_without_ollama_q2_expects_the_section_sentence_about_its_topic():
     # The real Q2: not the coins example's first sentence any more.
     item = generate_viva_questions([COINS_POINT], llm=broken_llm)[0]
 
-    assert item["question"] == (
-        "What does the video explain about supervised learning?"
-    )
-    assert item["answer"] == (
+    # (round 4: asked as fill-in-the-blank on that sentence)
+    assert answer_sentence(item) == (
         "Hence, supervised learning uses labeled data to train the model."
     )
+    assert viva.BLANK in item["question"]
+    assert item["answer"] in answer_sentence(item)
 
 
 def test_without_ollama_a_definition_now_matches_q2():
@@ -1167,7 +1191,7 @@ def test_a_topic_sentence_must_say_something_new():
     # adds only "today" to the question: the summary sentence is used.
     item = generate_viva_questions([PAUL_POINT], llm=broken_llm)[0]
 
-    assert item["answer"] == "He loves listening to new songs."
+    assert answer_sentence(item) == "He loves listening to new songs."
 
 
 def test_a_fallback_answer_points_at_the_segment_that_says_it():
@@ -1248,7 +1272,7 @@ def test_an_answer_first_question_must_fit_the_focused_passage():
 
     item = generate_viva_questions([REAL_CRICKET_POINT], llm=llm)[0]
 
-    assert item["source"] == "transcript"
+    assert item["source"] in FALLBACK_SOURCES
 
 
 def test_an_answer_first_question_is_checked_too():
@@ -1261,7 +1285,7 @@ def test_an_answer_first_question_is_checked_too():
 
     item = generate_viva_questions([CRICKET_POINT], llm=llm)[0]
 
-    assert item["source"] == "transcript"
+    assert item["source"] in FALLBACK_SOURCES
     assert "neural" not in item["question"].lower()
 
 
@@ -1283,7 +1307,7 @@ def test_questions_alternate_between_concept_and_example():
 
     generate_viva_questions([COINS_POINT, CRICKET_POINT], llm=llm)
 
-    step_one = [call for call in llm.calls if "Passage:" not in call]
+    step_one = [call for call in llm.calls if "Transcript excerpt:" in call]
 
     assert "Ask about the IDEA" in step_one[0]
     assert "Ask about the EXAMPLE" in step_one[1]
@@ -1312,9 +1336,12 @@ def test_every_expected_answer_answers_its_question():
     for point in (COINS_POINT, CRICKET_POINT, PAUL_POINT):
         item = generate_viva_questions([point], llm=llm)[0]
 
+        # (a blank's expected answer is a phrase of its checked sentence)
         assert viva._answer_problem(
-            item["answer"], item["question"], point["text"]
+            answer_sentence(item), item["question"], point["text"]
         ) is None
+
+        assert item["answer"] in answer_sentence(item)
 
 
 def test_rejections_are_logged_with_their_reason(caplog):
@@ -1621,10 +1648,11 @@ def test_the_examiner_prompt_defines_the_three_verdicts():
 def test_real_transition_sentence_is_never_a_fallback_answer():
     item = generate_viva_questions([REAL_TYPES_POINT], llm=broken_llm)[0]
 
-    assert item["answer"] != "Let's first quickly understand supervised learning."
-    assert item["answer"] == (
+    assert answer_sentence(item) != "Let's first quickly understand supervised learning."
+    assert answer_sentence(item) == (
         "It could be either supervised learning or reinforcement learning."
     )
+    assert item["answer"] == "reinforcement learning"
 
 
 @pytest.mark.parametrize("sentence", [
@@ -1651,8 +1679,9 @@ def test_low_information_sentences_are_not_answers(sentence):
 def test_the_llm_summary_description_is_never_the_expected_answer():
     item = generate_viva_questions([REAL_PAUL_POINT], llm=broken_llm)[0]
 
-    assert "Paul explains" not in item["answer"]
-    assert item["answer"] == "He loves listening to new songs."
+    assert "Paul explains" not in answer_sentence(item)
+    assert "Paul explains" not in item["question"]
+    assert answer_sentence(item) == "He loves listening to new songs."
 
 
 def test_every_fallback_answer_is_real_transcript():
@@ -1666,9 +1695,10 @@ def test_every_fallback_answer_is_real_transcript():
 def test_an_idea_beats_an_example_for_the_plain_question():
     item = generate_viva_questions([REAL_RL_POINT], llm=broken_llm)[0]
 
-    assert item["answer"] == (
+    assert answer_sentence(item) == (
         "Or we can say that it works on the principle of feedback."
     )
+    assert item["answer"] == "feedback"
 
 
 def test_a_while_continuation_is_joined_but_a_while_sentence_is_not():
@@ -1777,7 +1807,7 @@ def test_real_cricket_answer_starts_where_it_is_said():
         embedding_model=FakeEmbedder()
     )[0]
 
-    assert item["answer"].startswith("The one cluster are the players")
+    assert answer_sentence(item).startswith("The one cluster are the players")
     assert item["start"] == 248.4      # 4:08, not 4:13
     assert item["end"] == 258.0
 
@@ -2099,8 +2129,9 @@ def test_an_unmatched_passage_keeps_the_whole_section():
     assert item["end"] == REAL_CRICKET_POINT["end"]
 
 
-def test_without_ollama_questions_are_unchanged():
-    # The simple fallback (step 3) is untouched by round 3.
+def test_without_ollama_questions_use_the_same_sentences():
+    # (Round 4: without Ollama the question is fill-in-the-blank, on the
+    # SAME transcript sentences as before.)
     expected = {
         "Basics of Machine Learning": "He loves listening to new songs.",
         "Types of Machine Learning": "It could be either supervised learning or reinforcement learning.",
@@ -2110,5 +2141,356 @@ def test_without_ollama_questions_are_unchanged():
     for point in (REAL_PAUL_POINT, REAL_TYPES_POINT, REAL_RL_POINT):
         item = generate_viva_questions([point], llm=broken_llm)[0]
 
-        assert item["source"] == "transcript"
-        assert item["answer"] == expected[point["title"]]
+        assert item["source"] == "transcript_blank"
+        assert answer_sentence(item) == expected[point["title"]]
+        assert item["answer"] in expected[point["title"]]
+
+
+# ============================================================
+# ROUND 4: QUESTION/ANSWER ALIGNMENT AND NATURAL FEEDBACK
+# ============================================================
+
+def routed_llm(step_one="", answer_first="", one_sentence="", judge=""):
+    """A stand-in LLM that answers each prompt type differently."""
+    calls = []
+
+    def llm(prompt):
+        calls.append(prompt)
+        if "Answer sentence from the video:" in prompt:
+            return one_sentence
+        if "Passage:" in prompt:
+            return answer_first
+        if "Student's answer:" in prompt:
+            return judge
+        return step_one
+
+    llm.calls = calls
+    return llm
+
+
+REJECTED_STEP_ONE = (
+    # a yes/no question: always rejected
+    "QUESTION: Does Paul like listening to new songs?\n"
+    "ANSWER: Yes, he loves listening to new songs."
+)
+
+
+# ---- 1. specific questions for specific answers ------------------------
+
+def test_the_one_sentence_step_asks_what_paul_loves():
+    # The case from the real video: a broad question for "He loves
+    # listening to new songs." is replaced by a specific one.
+    llm = routed_llm(
+        step_one=REJECTED_STEP_ONE,
+        answer_first="QUESTION: Does Paul like songs?",
+        one_sentence="QUESTION: What does Paul love listening to?",
+    )
+
+    item = generate_viva_questions(
+        [REAL_PAUL_POINT], llm=llm,
+        segments=REAL_PAUL_SEGMENTS, embedding_model=FakeEmbedder()
+    )[0]
+
+    assert item["source"] == "llm_answer_sentence"
+    assert item["question"] == "What does Paul love listening to?"
+    assert item["answer"] == "He loves listening to new songs."
+
+    # exact timestamp of that sentence (0:23)
+    assert item["start"] == 23.6
+    assert item["end"] == 27.6
+
+
+def test_the_one_sentence_step_gets_the_sentence_before_as_context():
+    llm = routed_llm(step_one=REJECTED_STEP_ONE, answer_first="")
+
+    generate_viva_questions([REAL_PAUL_POINT], llm=llm)
+
+    prompt = next(c for c in llm.calls if "Answer sentence from the video:" in c)
+
+    assert "So that's Paul." in prompt                     # context
+    assert "He loves listening to new songs." in prompt    # the answer
+    assert "today we will learn" not in prompt             # nothing more
+
+
+def test_the_one_sentence_question_is_validated_too():
+    llm = routed_llm(
+        step_one=REJECTED_STEP_ONE,
+        # invents a claim: Paul does not use machine learning in the video
+        one_sentence="QUESTION: What is Paul primarily using his machine "
+                     "learning knowledge for?",
+    )
+
+    item = generate_viva_questions([REAL_PAUL_POINT], llm=llm)[0]
+
+    assert item["source"] == "transcript_blank"
+    assert "primarily" not in item["question"]
+
+
+def test_no_broad_question_is_paired_with_a_narrow_answer():
+    # Without Ollama, none of the real sections gets the broad
+    # "What does the video explain about ...?" question any more.
+    for point in (REAL_PAUL_POINT, REAL_TYPES_POINT, REAL_CRICKET_POINT, REAL_RL_POINT):
+        item = generate_viva_questions([point], llm=broken_llm)[0]
+
+        assert not item["question"].startswith("What does the video explain about")
+
+
+# ---- fill in the blank ------------------------------------------------
+
+@pytest.mark.parametrize("point, question, answer", [
+    (REAL_PAUL_POINT,
+     'Complete what the video says: "He loves listening to ______."',
+     "new songs"),
+    (REAL_TYPES_POINT,
+     'Complete what the video says: "It could be either supervised learning or ______."',
+     "reinforcement learning"),
+    (REAL_RL_POINT,
+     'Complete what the video says: "Or we can say that it works on the principle of ______."',
+     "feedback"),
+])
+def test_real_fill_in_the_blank_questions(point, question, answer):
+    item = generate_viva_questions([point], llm=broken_llm)[0]
+
+    assert item["source"] == "transcript_blank"
+    assert item["question"] == question
+    assert item["answer"] == answer
+
+
+def test_a_blank_is_aligned_with_its_answer_by_construction():
+    for point in (REAL_PAUL_POINT, REAL_TYPES_POINT, REAL_CRICKET_POINT, REAL_RL_POINT):
+        item = generate_viva_questions([point], llm=broken_llm)[0]
+
+        filled = item["question"].replace(viva.BLANK, item["answer"])
+
+        # filling the blank gives back the real transcript sentence
+        assert filled == f'Complete what the video says: "{item["answer_sentence"]}"'
+        assert viva._comparable(item["answer_sentence"]) in viva._comparable(point["text"])
+
+
+def test_a_blank_question_keeps_its_exact_timestamp():
+    item = generate_viva_questions(
+        [REAL_PAUL_POINT], llm=broken_llm,
+        segments=REAL_PAUL_SEGMENTS, embedding_model=FakeEmbedder()
+    )[0]
+
+    assert item["answer"] == "new songs"
+    assert item["start"] == 23.6     # the sentence's segment, 0:23
+    assert item["end"] == 27.6
+
+
+def test_a_blank_keeps_enough_of_the_sentence():
+    # Nothing would be left around the blank: no blank question.
+    assert viva._blank_question("Reinforcement learning matters.") is None
+
+
+def test_a_blank_matches_british_spelling():
+    question, answer = viva._blank_question(
+        "Supervised learning trains a model on labelled examples."
+    )
+
+    assert answer == "labelled examples"
+    assert question.endswith('on ______."')
+
+
+@pytest.mark.parametrize("answer, verdict", [
+    ("new songs", "correct"),
+    ("He loves listening to new songs.", "correct"),
+    ("I like playing cricket.", "incorrect"),
+    ("The capital of France is Paris.", "incorrect"),
+])
+def test_grading_a_blank_answer(answer, verdict):
+    item = generate_viva_questions([REAL_PAUL_POINT], llm=broken_llm)[0]
+
+    result = check_answer(
+        answer, item, FakeEmbedder(),
+        llm=examiner("CORRECT", "EXAMPLE") if verdict == "correct" else broken_llm
+    )
+
+    assert result["verdict"] == verdict
+
+
+def test_a_one_word_blank_answer_is_not_rejected_as_unrelated():
+    item = generate_viva_questions([REAL_RL_POINT], llm=broken_llm)[0]
+
+    assert item["answer"] == "feedback"
+
+    result = check_answer(
+        "feedback", item, FakeEmbedder(),
+        llm=examiner("CORRECT", "EXAMPLE")
+    )
+
+    assert result["verdict"] == "correct"
+
+
+def test_a_wrong_one_word_blank_answer_is_still_rejected():
+    item = generate_viva_questions([REAL_RL_POINT], llm=broken_llm)[0]
+
+    llm = examiner("CORRECT", "EXAMPLE")
+
+    result = check_answer("cricket", item, FakeEmbedder(), llm=llm)
+
+    assert result["verdict"] == "incorrect"
+    assert llm.calls == []
+
+
+# ---- 2. missing PHRASES, not words ---------------------------------------
+
+REAL_TYPES_BLANKLESS = {
+    # the real question/answer seen in the app
+    "question": "What does the video explain about types of machine learning?",
+    "answer": "It could be either supervised learning or reinforcement learning.",
+    "kind": "concept",
+    "start": 166.2,
+    "end": 170.0,
+    "text": "It could be either supervised learning or reinforcement learning.",
+    "section_start": 159.2,
+    "section_end": 181.0,
+    "section_text": REAL_TYPES_POINT["text"],
+    "title": "Types of Machine Learning",
+    "source": "transcript",
+}
+
+
+def test_the_real_types_feedback_is_natural(monkeypatch):
+    with_similarity(monkeypatch, 0.55)
+
+    result = check_answer(
+        "Supervised learning.", REAL_TYPES_BLANKLESS, FakeEmbedder(),
+        llm=examiner("PARTIAL", "INCOMPLETE")
+    )
+
+    assert result["verdict"] == "partial"
+    assert (
+        "You mentioned supervised learning. "
+        "Also mention reinforcement learning."
+    ) in result["feedback"]
+    assert "either" not in result["feedback"]
+    assert "Key points to mention" not in result["feedback"]
+
+
+def test_the_feedback_is_the_same_without_ollama(monkeypatch):
+    with_similarity(monkeypatch, 0.55)
+
+    result = check_answer(
+        "Supervised learning.", REAL_TYPES_BLANKLESS, FakeEmbedder(),
+        llm=broken_llm
+    )
+
+    assert result["verdict"] == "partial"
+    assert "Also mention reinforcement learning." in result["feedback"]
+    assert "either" not in result["feedback"]
+
+
+@pytest.mark.parametrize("text, phrases", [
+    ("It could be either supervised learning or reinforcement learning.",
+     ["supervised learning", "reinforcement learning"]),
+    ("He loves listening to new songs.", ["loves listening", "new songs"]),
+    ("And then there is reinforcement learning, which is a reward-based learning.",
+     ["reinforcement learning", "reward-based learning"]),
+    ("Neither supervised nor unsupervised learning is used here.",
+     ["supervised", "unsupervised learning", "used"]),
+])
+def test_key_phrases_skip_grammatical_words(text, phrases):
+    assert viva._key_phrases(text) == phrases
+
+    for phrase in viva._key_phrases(text):
+        for word in ("either", "neither", "could", "be", "or", "nor"):
+            assert word not in phrase.split()
+
+
+def test_a_shared_word_does_not_count_as_mentioning_a_phrase():
+    # "learning" is in both phrases: "Reinforcement learning." mentions
+    # only reinforcement learning, not supervised learning.
+    mentioned, missing = viva._phrase_feedback(
+        "Reinforcement learning.",
+        "It could be either supervised learning or reinforcement learning.",
+        "What does the video explain about types of machine learning?"
+    )
+
+    assert mentioned == ["reinforcement learning"]
+    assert missing == ["supervised learning"]
+
+
+def test_phrases_the_question_already_contains_are_not_asked_for():
+    mentioned, missing = viva._phrase_feedback(
+        "It is reward based.",
+        "Reinforcement learning works on the principle of feedback.",
+        "What principle does reinforcement learning work on?"
+    )
+
+    assert "reinforcement learning" not in missing
+    assert "feedback" in missing
+
+
+def test_a_grounded_llm_missing_concept_is_still_preferred(monkeypatch):
+    with_similarity(monkeypatch, 0.55)
+
+    result = check_answer(
+        "Supervised learning.", REAL_TYPES_BLANKLESS, FakeEmbedder(),
+        llm=examiner("PARTIAL", "INCOMPLETE", "reinforcement learning")
+    )
+
+    assert "Missing: Reinforcement learning." in result["feedback"]
+    assert "Also mention" not in result["feedback"]
+
+
+def test_an_ungrounded_llm_missing_concept_falls_back_to_phrases(monkeypatch):
+    with_similarity(monkeypatch, 0.55)
+
+    result = check_answer(
+        "Supervised learning.", REAL_TYPES_BLANKLESS, FakeEmbedder(),
+        llm=examiner("PARTIAL", "INCOMPLETE", "gradient descent optimisation")
+    )
+
+    assert "gradient" not in result["feedback"]
+    assert "Also mention reinforcement learning." in result["feedback"]
+
+
+def test_unrelated_answers_get_no_missing_point_hints():
+    result = check_answer(
+        "I like playing cricket.", REAL_TYPES_BLANKLESS, FakeEmbedder(),
+        llm=examiner("CORRECT", "CONCEPT")
+    )
+
+    assert result["verdict"] == "incorrect"
+    assert "Also mention" not in result["feedback"]
+
+
+def test_grading_levels_are_unchanged_by_the_feedback(monkeypatch):
+    with_similarity(monkeypatch, 0.55)
+
+    for verdict_text, expected in (
+        ("VERDICT: CORRECT\nTYPE: CONCEPT\nCONTRADICTS: NO\nMISSING: NONE", "correct"),
+        ("VERDICT: PARTIAL\nTYPE: INCOMPLETE\nCONTRADICTS: NO\nMISSING: NONE", "partial"),
+        ("VERDICT: INCORRECT\nTYPE: WRONG\nCONTRADICTS: YES\nMISSING: NONE", "incorrect"),
+    ):
+        result = check_answer(
+            "It could be supervised learning or reinforcement learning, two types.",
+            REAL_TYPES_BLANKLESS, FakeEmbedder(), llm=fixed_llm(verdict_text)
+        )
+
+        assert result["verdict"] == expected
+
+
+def test_the_next_sentence_is_blanked_when_the_first_cannot_be():
+    # Found on the real transcript: "This was a basic machine learning
+    # algorithm also." is almost one phrase, so another sentence of the
+    # section is used - not the broad last-resort question.
+    point = {
+        "title": "Definitely Algorithms",
+        "summary": "(LLM-written summary description)",
+        "start": 120.0,
+        "end": 140.0,
+        "text": (
+            "If we go for the majority votes, we can say that Paul will "
+            "definitely like the song. This was a basic machine learning "
+            "algorithm also. So this is just a small example in one of the "
+            "many machine learning algorithms."
+        ),
+    }
+
+    item = generate_viva_questions([point], llm=broken_llm)[0]
+
+    assert item["source"] == "transcript_blank"
+    assert not item["question"].startswith("What does the video explain about")
+    assert viva.BLANK in item["question"]

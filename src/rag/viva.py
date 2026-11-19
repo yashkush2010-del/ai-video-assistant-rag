@@ -251,6 +251,12 @@ FILLER_WORDS = {
     "great", "thanks", "simple", "okay",
 }
 
+# Grammatical words that are never a key POINT of an answer, but are
+# not in the summary's stop-word list (found on the real video:
+# "Key points to mention: either, reinforcement"). Used only for the
+# missing-point feedback, so grading and passage choice are unchanged.
+GRAMMAR_WORDS = {"either", "neither", "both", "whether", "based"}
+
 _FILLER_STEMS = {_stem(word) for word in FILLER_WORDS}
 
 # British / American spelling, so "labelled" and "labeled" are the same
@@ -858,6 +864,103 @@ QUESTION: <one question that ends with a question mark>
 """
 
 
+# Step 2b: ONE sentence is the answer; the sentence before it is only
+# context, so the model knows who "he" or "it" is. Found on the real
+# video: for "He loves listening to new songs." (after "So that's Paul.")
+# the broad question "What does the video explain about basics of
+# machine learning?" was used; this asks for "What does Paul love
+# listening to?" instead.
+ANSWER_SENTENCE_PROMPT = """You are an examiner preparing viva (oral exam) questions about a video.
+
+What the video says just before (context only):
+__CONTEXT__
+
+Answer sentence from the video:
+__SENTENCE__
+
+Write ONE specific open question (starting with What, How, Why, Which or Who; never a yes/no question) whose complete answer is exactly the answer sentence.
+Use the context only to know who or what the sentence is about (for example, use the person's name instead of "he").
+Do not add facts that are not in these two texts. Never mention the transcript or the sentence itself.
+
+Reply in exactly this format and nothing else:
+QUESTION: <one question that ends with a question mark>
+"""
+
+
+# ============================================================
+# FILL-IN-THE-BLANK (when no LLM question can be used)
+# ============================================================
+#
+# A question that is aligned with its answer BY CONSTRUCTION: one real
+# transcript sentence with its last meaningful phrase left out.
+#   "He loves listening to new songs."
+#   -> Complete what the video says: "He loves listening to ______."
+#   -> expected answer: "new songs"
+# Works without Ollama, and never pairs a broad question with a narrow
+# answer.
+
+BLANK = "______"
+
+# The rest of the sentence must still say what it is about.
+MIN_WORDS_AROUND_BLANK = 2
+
+
+def _spelling_pattern(word):
+    """A word in any of its spellings: "labeled" -> (labeled|labelled)."""
+    forms = {word} | {
+        british
+        for british, american in _SPELLING.items()
+        if american == word.lower()
+    }
+
+    return "(?:" + "|".join(re.escape(form) for form in sorted(forms)) + ")"
+
+
+def _blank_question(sentence):
+    """
+    (question, expected answer) for a fill-in-the-blank question on a
+    real transcript sentence, or None.
+
+    The blank is the LAST meaningful phrase of the sentence, preferring
+    a phrase of at least two words ("new songs", "reinforcement
+    learning", "surge pricing") over a single word.
+    """
+    phrases = _key_phrases(sentence)
+
+    candidates = (
+        [phrase for phrase in reversed(phrases) if len(phrase.split()) >= 2]
+        + [phrase for phrase in reversed(phrases) if len(phrase.split()) == 1]
+    )
+
+    for phrase in candidates:
+        # the phrase as it is written in the sentence (last occurrence)
+        # phrases are compared in American spelling ("labeled"); the
+        # sentence may use the British one ("labelled")
+        matches = list(re.finditer(
+            r"(?<![A-Za-z0-9])"
+            + r"\s+".join(_spelling_pattern(word) for word in phrase.split())
+            + r"(?![A-Za-z0-9])",
+            sentence,
+            flags=re.IGNORECASE
+        ))
+
+        if not matches:
+            continue
+
+        match = matches[-1]
+        before = sentence[:match.start()]
+        after = sentence[match.end():]
+
+        if len(_key_words(before + " " + after)) < MIN_WORDS_AROUND_BLANK:
+            continue
+
+        question = f'Complete what the video says: "{before}{BLANK}{after}"'
+
+        return question, match.group(0)
+
+    return None
+
+
 # ============================================================
 # EXACT TIMESTAMP OF THE ANSWER
 # ============================================================
@@ -971,8 +1074,12 @@ def _focus_on_answer(item, segments, embedding_model, exact_only=False):
         for segment in inside
     ]
 
+    # What to look for: the whole sentence of a fill-in-the-blank
+    # question, otherwise the expected answer itself.
+    target = item.get("answer_sentence") or item["answer"]
+
     # An answer taken from the transcript: its exact place.
-    located = _locate_text(item["answer"], texts)
+    located = _locate_text(target, texts)
 
     if located is not None:
         first, last = located
@@ -989,7 +1096,7 @@ def _focus_on_answer(item, segments, embedding_model, exact_only=False):
     try:
         vectors = np.asarray(
             embedding_model.encode(
-                [item["answer"]] + texts,
+                [target] + texts,
                 normalize_embeddings=True
             ),
             dtype="float32"
@@ -1025,8 +1132,10 @@ def _focus_on_answer(item, segments, embedding_model, exact_only=False):
 def _question_for_point(point, number, kind, llm, state):
     """
     The three steps (see the module docstring).
-    Returns (question, answer, kind, source, focus) or None;
-    focus says how the timestamp is found (see FOCUS_... below).
+    Returns (question, answer, kind, source, focus, answer_sentence) or
+    None; focus says how the timestamp is found (see FOCUS_... above);
+    answer_sentence is the whole sentence of a fill-in-the-blank
+    question (None otherwise).
     """
     text = str(point.get("text", "")).strip()
     title = point.get("title", "")
@@ -1053,7 +1162,7 @@ def _question_for_point(point, number, kind, llm, state):
         )
 
         if problem is None:
-            return question, answer, kind, "llm", FOCUS_BEST
+            return question, answer, kind, "llm", FOCUS_BEST, None
 
         log.warning(
             "Viva question %d (%s): LLM question not used - %s",
@@ -1091,7 +1200,7 @@ def _question_for_point(point, number, kind, llm, state):
                 # whole section - never a guessed position.
                 return (
                     question, focused, _passage_kind(focused),
-                    "llm_answer_first", FOCUS_EXACT_ONLY
+                    "llm_answer_first", FOCUS_EXACT_ONLY, None
                 )
 
             log.warning(
@@ -1099,31 +1208,100 @@ def _question_for_point(point, number, kind, llm, state):
                 number, title, problem
             )
 
-    # ---- 3) the transcript itself ------------------------------------
+    # ---- the one sentence that steps 2b and 3 are about -------------
+    # Only real Whisper transcript, never the summary's description
+    # (on the real video that was an LLM sentence that was not true:
+    # "Paul explains the importance of understanding and reasoning"):
+    # the section's informative sentence about the topic, else its most
+    # informative sentence.
+    hint = _fallback_question(point)
+
+    # candidates in order of preference: the topic sentence, the most
+    # informative sentence, then the other informative sentences
+    candidates = []
+
+    for candidate in (
+        [_topic_sentence(text, hint), _most_informative_sentence(text, hint)]
+        + [s for s in _split_sentences(text) if _is_informative(s)]
+    ):
+        if (
+            candidate
+            and candidate not in candidates
+            and _answer_problem(candidate, hint, text) is None
+        ):
+            candidates.append(candidate)
+
+    sentence = candidates[0] if candidates else None
+
+    # ---- 2b) one sentence + its context, LLM writes the question ----
+    if raw is not None and sentence:
+        sentences = _split_sentences(text)
+        position = sentences.index(sentence) if sentence in sentences else -1
+        context = sentences[position - 1] if position > 0 else ""
+
+        raw_question = _call_llm(
+            llm,
+            ANSWER_SENTENCE_PROMPT
+            .replace("__CONTEXT__", context or "(nothing)")
+            .replace("__SENTENCE__", sentence),
+            state
+        )
+
+        if raw_question:
+            question = _clean_question(
+                _extract_field(raw_question, "question")
+            )
+
+            problem = (
+                _question_problem(question, f"{context} {sentence}")
+                or _answer_problem(sentence, question, text)
+            )
+
+            if problem is None:
+                return (
+                    question, sentence, _passage_kind(sentence),
+                    "llm_answer_sentence", FOCUS_EXACT_ONLY, None
+                )
+
+            log.warning(
+                "Viva question %d (%s): one-sentence question not used - %s",
+                number, title, problem
+            )
+
+    # ---- 3) fill in the blank: aligned by construction ----------------
     if not raw:
         log.warning(
             "Viva question %d (%s): language model not available or "
-            "gave no reply, using the simple question form",
+            "gave no reply, using a fill-in-the-blank question",
             number, title
         )
 
-    question = _fallback_question(point)
+    # the first candidate sentence that leaves enough around its blank
+    # (found on the real video: "This was a basic machine learning
+    # algorithm also." is almost one phrase - nothing would be left)
+    for candidate in candidates:
+        blank = _blank_question(candidate)
 
-    # Only real Whisper transcript, never the summary's description
-    # (on the real video that was an LLM sentence that was not true:
-    # "Paul explains the importance of understanding and reasoning").
-    # 1. the section's own informative sentence about the topic,
-    # 2. else its most informative sentence,
-    # 3. else its informative passage.
-    for sentence in (
-        _topic_sentence(text, question),
-        _most_informative_sentence(text, question),
-    ):
-        if sentence and _answer_problem(sentence, question, text) is None:
-            return question, sentence, "concept", "transcript", FOCUS_BEST
+        if blank is not None:
+            question, answer = blank
+
+            # the answer is a phrase of the sentence; the timestamp is
+            # found from the whole sentence
+            return (
+                question, answer, "example",
+                "transcript_blank", FOCUS_BEST, candidate
+            )
+
+    # Last resort (no sentence that can be blanked): the plain question
+    # with the section's informative passage.
+    question = hint
 
     if _answer_problem(passage, question, text) is None:
-        return question, passage, "concept", "transcript", FOCUS_NONE
+        log.warning(
+            "Viva question %d (%s): using the plain question form",
+            number, title
+        )
+        return question, passage, "concept", "transcript", FOCUS_NONE, None
 
     return None
 
@@ -1173,7 +1351,11 @@ def generate_viva_questions(
             "section_text",
             "title",
             "source"                  # llm | llm_answer_first
+                                      # | llm_answer_sentence
+                                      # | transcript_blank
                                       # | transcript
+            "answer_sentence"         # (fill-in-the-blank only) the
+                                      # whole transcript sentence
           }, ...                      # in video order
         ]
     """
@@ -1210,7 +1392,7 @@ def generate_viva_questions(
             )
             continue
 
-        question, answer, kind, source, focus = made
+        question, answer, kind, source, focus, answer_sentence = made
 
         # Skip a question that repeats an earlier one.
         words = _stem_set(question)
@@ -1239,6 +1421,9 @@ def generate_viva_questions(
             "section_end": point["end"],
             "section_text": text,
         }
+
+        if answer_sentence:
+            item["answer_sentence"] = answer_sentence
 
         # An answer made of the whole passage has no narrower place.
         if (
@@ -1331,12 +1516,162 @@ def _missing_words(user_answer, expected_answer, question):
     for word in _content_words(_normalise(expected_answer)):
         stem = _stem(word)
 
-        if stem not in key or stem in given or word in missing:
+        if (
+            stem not in key
+            or stem in given
+            or word in missing
+            or word.lower() in GRAMMAR_WORDS
+        ):
             continue
 
         missing.append(word)
 
     return missing[:MAX_MISSING_WORDS]
+
+
+# ---- missing PHRASES, not words ------------------------------------
+#
+# Found on the real video: for "It could be either supervised learning
+# or reinforcement learning." the answer "Supervised learning." got
+# "Key points to mention: either, reinforcement". The expected answer is
+# now split into its meaningful phrases ("supervised learning",
+# "reinforcement learning"): every stop word, filler or grammatical word
+# ("it could be either ... or") ends a phrase and is never a key point.
+# Feedback: "You mentioned supervised learning. Also mention
+# reinforcement learning."
+
+MAX_MISSING_PHRASES = 3
+
+_PHRASE_TOKENS = re.compile(r"[A-Za-z0-9]+(?:[-'\u2019][A-Za-z0-9]+)*|[^\sA-Za-z0-9]")
+
+
+def _is_phrase_word(token):
+    """A word that can be part of a key phrase."""
+    if not re.match(r"[A-Za-z0-9]", token):
+        return False
+
+    # e.g. "reward-based" is one meaningful word
+    if "-" in token:
+        return True
+
+    if token.lower() in GRAMMAR_WORDS:
+        return False
+
+    return bool(_key_words(token))
+
+
+def _key_phrases(text):
+    """
+    Meaningful phrases of a text, in order: runs of consecutive content
+    words, cut at every stop word, filler word and punctuation mark.
+    "It could be either supervised learning or reinforcement learning."
+    -> ["supervised learning", "reinforcement learning"]
+    """
+    phrases = []
+    current = []
+
+    for token in _PHRASE_TOKENS.findall(_normalise(text)):
+
+        if _is_phrase_word(token):
+            current.append(token)
+            continue
+
+        if current:
+            phrases.append(current)
+            current = []
+
+    if current:
+        phrases.append(current)
+
+    seen = set()
+    result = []
+
+    for words in phrases:
+        phrase = " ".join(
+            word if word.isupper() and len(word) > 1 else word.lower()
+            for word in words
+        )
+
+        if phrase not in seen:
+            seen.add(phrase)
+            result.append(phrase)
+
+    return result
+
+
+def _phrase_stems(phrase):
+    return _key_words(phrase.replace("-", " "))
+
+
+def _phrase_feedback(user_answer, expected_answer, question):
+    """
+    (mentioned, missing) phrases of the expected answer.
+
+    A phrase the question already contains is not asked for. A word that
+    several phrases share ("learning" in "supervised learning" and
+    "reinforcement learning") does not decide anything: a phrase counts as
+    mentioned when the answer has its own distinctive words.
+    """
+    phrases = [
+        phrase
+        for phrase in _key_phrases(expected_answer)
+        if _phrase_stems(phrase)
+        and not _phrase_stems(phrase) <= _key_words(question)
+    ]
+
+    counts = {}
+
+    for phrase in phrases:
+        for stem in _phrase_stems(phrase):
+            counts[stem] = counts.get(stem, 0) + 1
+
+    given = _key_words(user_answer)
+
+    mentioned = []
+    missing = []
+
+    for phrase in phrases:
+        stems = _phrase_stems(phrase)
+        distinctive = {stem for stem in stems if counts[stem] == 1} or stems
+
+        if distinctive <= given:
+            mentioned.append(phrase)
+        else:
+            missing.append(phrase)
+
+    return mentioned, missing[:MAX_MISSING_PHRASES]
+
+
+def _join_phrases(phrases):
+    """["a"] -> "a";  ["a", "b"] -> "a and b";  ["a", "b", "c"] -> "a, b and c"."""
+    if len(phrases) <= 1:
+        return "".join(phrases)
+
+    return ", ".join(phrases[:-1]) + " and " + phrases[-1]
+
+
+def _missing_feedback(user_answer, item, missing_concept):
+    """
+    The natural "what is missing" sentence(s), or "".
+    An LLM-named missing idea is used when the video says it; otherwise
+    the missing phrases of the expected answer.
+    """
+    if missing_concept:
+        return f" Missing: {missing_concept}."
+
+    mentioned, missing = _phrase_feedback(
+        user_answer, item["answer"], item["question"]
+    )
+
+    if not missing:
+        return ""
+
+    text = ""
+
+    if mentioned:
+        text += f" You mentioned {_join_phrases(mentioned)}."
+
+    return text + f" Also mention {_join_phrases(missing)}."
 
 
 def _only_repeats_question(user_answer, question):
@@ -1719,6 +2054,10 @@ def check_answer(user_answer, item, embedding_model, llm=None):
     on_topic = (
         len(_topic_words(user_answer, item)) >= MIN_TOPIC_WORDS
         or similarity >= PARTIAL_SIMILARITY
+        # A fill-in-the-blank answer can be one word ("feedback"): an
+        # answer that contains most of the EXPECTED answer's own key words
+        # is about the question. Unrelated answers contain none of them.
+        or coverage >= CORRECT_COVERAGE
     )
 
     if not on_topic:
@@ -1747,8 +2086,8 @@ def check_answer(user_answer, item, embedding_model, llm=None):
         kind = {"correct": "video"}.get(verdict, verdict)
         feedback = FEEDBACK[kind]
 
-        if verdict != "correct" and missing:
-            feedback += " Key points to mention: " + ", ".join(missing) + "."
+        if verdict != "correct" and kind != "off_topic":
+            feedback += _missing_feedback(user_answer, item, None)
 
         return result(
             verdict, kind,
@@ -1833,10 +2172,7 @@ def check_answer(user_answer, item, embedding_model, llm=None):
     feedback = FEEDBACK[kind]
 
     if final != "correct":
-        if missing_concept:
-            feedback += f" Missing: {missing_concept}."
-        elif missing:
-            feedback += " Key points to mention: " + ", ".join(missing) + "."
+        feedback += _missing_feedback(user_answer, item, missing_concept)
 
     return result(
         final, kind, feedback,
