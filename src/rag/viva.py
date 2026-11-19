@@ -575,6 +575,56 @@ def _question_problem(question, text):
     return None
 
 
+# ---- questions that ask for MORE than a fact ------------------------
+#
+# Found on the real video: llama3.2 asked "What is the difference between
+# supervised learning and reinforcement learning?" for the sentence "It
+# could be either supervised learning or reinforcement learning." Every
+# word of the question is in the clip, but the sentence only NAMES the
+# two types; it explains no difference. A question that asks for a
+# difference or a reason needs an answer that contains one.
+
+_ASKS_FOR_DIFFERENCE = re.compile(
+    r"\b(difference|differences|differ|differs|distinguish|distinguishes|"
+    r"compare|compared|comparison|contrast|versus|vs)\b",
+    flags=re.IGNORECASE
+)
+
+_ASKS_FOR_REASON = re.compile(
+    r"^\s*why\b|\b(reason|reasons)\b",
+    flags=re.IGNORECASE
+)
+
+_STATES_A_DIFFERENCE = re.compile(
+    r"\b(while|whereas|but|unlike|however|instead|rather than|than|"
+    r"on the other hand|in contrast|differ|differs|difference|"
+    r"compared|opposite)\b",
+    flags=re.IGNORECASE
+)
+
+_STATES_A_REASON = re.compile(
+    r"\b(because|since|so that|so|therefore|hence|thus|due to|"
+    r"as a result|in order to|which is why|that is why|that's why)\b",
+    flags=re.IGNORECASE
+)
+
+
+def _asks_more_than_the_answer_gives(question, answer):
+    """
+    A reason when the question asks for a difference or a reason that the
+    answer does not contain, else None.
+    """
+    answer = str(answer).replace("\u2019", "'")
+
+    if _ASKS_FOR_DIFFERENCE.search(str(question)) and not _STATES_A_DIFFERENCE.search(answer):
+        return "the question asks for a difference the answer does not give"
+
+    if _ASKS_FOR_REASON.search(str(question)) and not _STATES_A_REASON.search(answer):
+        return "the question asks for a reason the answer does not give"
+
+    return None
+
+
 def _answer_problem(answer, question, text):
     """
     Why an expected answer cannot be used, or None if it can.
@@ -591,6 +641,11 @@ def _answer_problem(answer, question, text):
 
     if _is_transition(answer):
         return "the answer only announces a topic"
+
+    asks_more = _asks_more_than_the_answer_gives(question, answer)
+
+    if asks_more:
+        return asks_more
 
     if _answer_adds_nothing(answer, question):
         return "the answer only repeats the question"

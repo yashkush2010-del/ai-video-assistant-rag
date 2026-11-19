@@ -2494,3 +2494,101 @@ def test_the_next_sentence_is_blanked_when_the_first_cannot_be():
     assert item["source"] == "transcript_blank"
     assert not item["question"].startswith("What does the video explain about")
     assert viva.BLANK in item["question"]
+
+
+# ============================================================
+# ROUND 5: A "DIFFERENCE" OR "WHY" QUESTION NEEDS SUCH AN ANSWER
+# ============================================================
+
+REAL_DIFFERENCE_QUESTION = (
+    # what llama3.2 asked on the real video for "It could be either
+    # supervised learning or reinforcement learning."
+    "QUESTION: What is the difference between supervised learning and "
+    "reinforcement learning?"
+)
+
+
+def test_the_real_difference_question_is_not_used_for_a_plain_list():
+    llm = routed_llm(
+        step_one=REJECTED_STEP_ONE,
+        answer_first=REAL_DIFFERENCE_QUESTION,
+        one_sentence=REAL_DIFFERENCE_QUESTION,
+    )
+
+    item = generate_viva_questions([REAL_TYPES_POINT], llm=llm)[0]
+
+    assert "difference" not in item["question"].lower()
+
+    # the safe next step: fill in the blank on the same sentence
+    assert item["source"] == "transcript_blank"
+    assert item["answer_sentence"] == (
+        "It could be either supervised learning or reinforcement learning."
+    )
+    assert item["answer"] == "reinforcement learning"
+
+
+def test_the_reason_is_logged(caplog):
+    llm = routed_llm(
+        step_one=REJECTED_STEP_ONE,
+        answer_first=REAL_DIFFERENCE_QUESTION,
+        one_sentence=REAL_DIFFERENCE_QUESTION,
+    )
+
+    with caplog.at_level("WARNING", logger="src.rag.viva"):
+        generate_viva_questions([REAL_TYPES_POINT], llm=llm)
+
+    assert "asks for a difference the answer does not give" in caplog.text
+
+
+def test_a_difference_question_with_a_real_difference_is_kept():
+    llm = fixed_llm(
+        "QUESTION: What is the difference between the two clusters of "
+        "players?\n"
+        "ANSWER: The one cluster are the players who scored high runs and "
+        "took less wickets, while the other cluster scored less runs but "
+        "took many wickets."
+    )
+
+    item = generate_viva_questions([REAL_CRICKET_POINT], llm=llm)[0]
+
+    assert item["source"] == "llm"
+    assert "difference" in item["question"]
+
+
+@pytest.mark.parametrize("question, answer, problem", [
+    # difference
+    ("What is the difference between supervised and reinforcement learning?",
+     "It could be either supervised learning or reinforcement learning.", True),
+    ("How do the two clusters differ?",
+     "One cluster scored high runs, while the other took many wickets.", False),
+    ("Compare supervised and unsupervised learning in the video?",
+     "Supervised learning uses labeled data, unlike unsupervised learning.", False),
+    # reason
+    ("Why is it called unsupervised learning?",
+     "It is unsupervised learning.", True),
+    ("Why is it called unsupervised learning?",
+     "Because there were no labels of batsmen and bowlers.", False),
+    ("What is the reason it is unsupervised learning?",
+     "Hence, the learning with unlabeled data is unsupervised learning.", False),
+    # ordinary questions are not affected
+    ("What does Paul love listening to?",
+     "He loves listening to new songs.", False),
+    ("What principle does reinforcement learning work on?",
+     "It works on the principle of feedback.", False),
+])
+def test_questions_that_ask_for_more_than_a_fact(question, answer, problem):
+    found = viva._asks_more_than_the_answer_gives(question, answer)
+
+    assert (found is not None) is problem
+
+
+def test_an_ordinary_one_sentence_question_is_still_used():
+    llm = routed_llm(
+        step_one=REJECTED_STEP_ONE,
+        answer_first="",
+        one_sentence="QUESTION: What does Paul love listening to?",
+    )
+
+    item = generate_viva_questions([REAL_PAUL_POINT], llm=llm)[0]
+
+    assert item["source"] == "llm_answer_sentence"
