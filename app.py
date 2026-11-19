@@ -24,7 +24,8 @@ from src.rag.vector_store import (
 
 from src.rag.answer_generator import (
     prepare_context,
-    generate_answer
+    generate_answer,
+    LLMUnavailableError
 )
 
 from src.rag.video_summary import (
@@ -339,6 +340,11 @@ if "last_evidence_segments" not in st.session_state:
 if "last_related_keyframe" not in st.session_state:
     st.session_state.last_related_keyframe = None
 
+# Message shown when the last question could not be answered
+# because Ollama was not available.
+if "qa_error" not in st.session_state:
+    st.session_state.qa_error = None
+
 
 # ============================================================
 # VIDEO UPLOAD
@@ -538,6 +544,8 @@ if video_source is not None:
         st.session_state.last_evidence_segments = []
 
         st.session_state.last_related_keyframe = None
+
+        st.session_state.qa_error = None
 
 
         st.success(
@@ -808,9 +816,11 @@ if st.session_state.video_data is not None:
             st.session_state.jump_time
         )
 
+        # jump_time is the POSITION in the video (in seconds), shown
+        # as m:ss like every other timestamp: 173 -> "2:53".
         st.success(
-            f"🎯 Video opened at approximately "
-            f"{int(jump_time)} seconds."
+            f"🎯 Video opened at "
+            f"{format_timestamp(jump_time)}."
         )
 
         if st.button(
@@ -1503,10 +1513,35 @@ if (
                 "Generating answer..."
             ):
 
-                answer = generate_answer(
-                    context,
-                    question
-                )
+                try:
+
+                    answer = generate_answer(
+                        context,
+                        question
+                    )
+
+                except LLMUnavailableError as error:
+
+                    # No answer is shown (not even the previous one):
+                    # only the message, and the question stays in
+                    # the box so it can be asked again.
+                    st.session_state.last_question = (
+                        question
+                    )
+
+                    st.session_state.last_answer = None
+
+                    st.session_state.last_evidence_segments = []
+
+                    st.session_state.last_related_keyframe = None
+
+                    st.session_state.qa_error = str(error)
+
+                    st.rerun()
+
+
+            # A successful answer clears an earlier error message.
+            st.session_state.qa_error = None
 
 
             # ------------------------------------------------
@@ -1637,6 +1672,17 @@ if (
             # =================================================
 
             st.rerun()
+
+
+    # ========================================================
+    # LANGUAGE MODEL NOT AVAILABLE
+    # ========================================================
+
+    if st.session_state.qa_error:
+
+        st.error(
+            f"⚠️ {st.session_state.qa_error}"
+        )
 
 
     # ========================================================

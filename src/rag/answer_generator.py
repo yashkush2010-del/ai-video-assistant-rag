@@ -18,6 +18,51 @@ def prepare_context(results):
     return context
 
 
+# ============================================================
+# WHEN OLLAMA CANNOT ANSWER
+# ============================================================
+#
+# If Ollama is not running, ollama.chat() raises a connection error
+# ("Failed to connect to Ollama ..."), and if the model has not been
+# downloaded it raises ollama.ResponseError (404). Without handling,
+# that error reached Streamlit as a traceback. It is turned into
+# LLMUnavailableError with a message the user can act on. No answer
+# is made up: the caller decides what to show.
+
+LLM_MODEL = "llama3.2"
+
+OLLAMA_NOT_RUNNING_MESSAGE = (
+    "The language model is not available: Ollama does not seem to be "
+    "running, so this question could not be answered. Start Ollama "
+    "(open the Ollama app, or run \"ollama serve\" in a terminal) and "
+    "ask the question again."
+)
+
+MODEL_NOT_FOUND_MESSAGE = (
+    f"The language model \"{LLM_MODEL}\" is not installed in Ollama, so "
+    f"this question could not be answered. Download it with "
+    f"\"ollama pull {LLM_MODEL}\" and ask the question again."
+)
+
+
+class LLMUnavailableError(Exception):
+    """Ollama could not produce an answer. str(error) is shown to the user."""
+
+
+def _connection_errors():
+    """Errors that mean Ollama could not be reached."""
+    errors = [ConnectionError, TimeoutError, OSError]
+
+    # Older ollama versions let httpx's own errors through.
+    try:
+        import httpx
+        errors.append(httpx.TransportError)
+    except ImportError:
+        pass
+
+    return tuple(errors)
+
+
 def generate_answer(context, question):
     prompt = f"""
 Answer the question using only the information provided in the context.
@@ -34,15 +79,38 @@ Question:
 Answer:
 """
 
-    response = ollama.chat(
-        model="llama3.2",
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    )
+    response_error = getattr(ollama, "ResponseError", None)
+
+    try:
+        response = ollama.chat(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+
+    except _connection_errors() as error:
+        raise LLMUnavailableError(OLLAMA_NOT_RUNNING_MESSAGE) from error
+
+    except Exception as error:
+        # Only Ollama's own response errors are expected here; anything
+        # else is a real bug and is not hidden.
+        if response_error is None or not isinstance(error, response_error):
+            raise
+
+        if (
+            getattr(error, "status_code", None) == 404
+            or "not found" in str(error).lower()
+        ):
+            raise LLMUnavailableError(MODEL_NOT_FOUND_MESSAGE) from error
+
+        raise LLMUnavailableError(
+            f"The language model could not answer this question "
+            f"(Ollama said: {error}). Please try again."
+        ) from error
 
     return response["message"]["content"]
 
