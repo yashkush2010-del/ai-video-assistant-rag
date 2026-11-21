@@ -20,7 +20,7 @@ from src.rag.vector_store import (
     create_index,
     retrieve_chunks,
     add_neighbouring_chunks,
-    find_answer_segments
+    find_evidence
 )
 
 from src.rag.answer_generator import (
@@ -1679,12 +1679,14 @@ if (
 
             else:
 
+                # Two consecutive transcript pieces, chosen by the
+                # question and the answer (see find_evidence).
                 evidence_segments = (
-                    find_answer_segments(
+                    find_evidence(
                         results,
+                        question,
                         answer,
-                        embedding_model,
-                        max_segments=1
+                        embedding_model
                     )
                 )
 

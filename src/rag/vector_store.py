@@ -1,3 +1,5 @@
+import re
+
 import faiss
 import numpy as np
 
@@ -467,3 +469,188 @@ def find_answer_segments(
     return scored_segments[
         :max_segments
     ]
+
+
+# ============================================================
+# FIND EVIDENCE FOR A QUESTION AND ITS ANSWER
+# ============================================================
+#
+# The evidence is the transcript text shown under the answer, with
+# the Jump time. find_answer_segments() picks the ONE Whisper piece
+# most similar to the whole answer. Two problems, measured with
+# scripts/check_evidence.py on two videos (18 questions):
+#
+#   - Whisper cuts speech into very short pieces, often half a
+#     sentence. "Well, that's called machine learning" and "which is
+#     used by global taxi giant Uber" are separate pieces, and the one
+#     piece alone rarely looks like the answer.
+#   - A long answer mentions several things, so the most similar piece
+#     can be about a side topic ("What is machine learning?" jumped to
+#     "Hence, supervised learning uses labeled data").
+#
+# Here every 2 consecutive pieces are one candidate, scored half on
+# the QUESTION and half on the answer sentence it matches best.
+# Right place: 13 of 18 before, 15 of 18 with this. The text shown is
+# also a complete thought instead of half a sentence.
+
+EVIDENCE_PIECES = 2
+
+# Pieces at most this far apart (seconds) are consecutive speech.
+EVIDENCE_PIECE_GAP = 1.0
+
+# Answer sentences shorter than this are not used to choose evidence.
+MIN_ANSWER_SENTENCE_WORDS = 4
+
+# Openers that are not the real first sentence of an answer.
+_ANSWER_OPENER = re.compile(
+    r"^(here'?s the answer|according to the video)[:.,]?\s*$",
+    flags=re.IGNORECASE
+)
+
+
+def _answer_sentences(answer):
+
+    parts = re.split(
+        r"(?<=[.!?:])\s+|\n+",
+        str(answer)
+    )
+
+    sentences = [
+        part.strip(" -*\t")
+        for part in parts
+    ]
+
+    return [
+        sentence
+        for sentence in sentences
+        if len(sentence.split()) >= MIN_ANSWER_SENTENCE_WORDS
+        and not _ANSWER_OPENER.match(sentence)
+    ]
+
+
+def _evidence_candidates(results, pieces):
+
+    # Every piece once, in the order of the video.
+    seen = set()
+    ordered = []
+
+    for result in results:
+
+        for segment in result.get(
+            "segments",
+            []
+        ):
+
+            text = segment.get(
+                "text",
+                ""
+            ).strip()
+
+            if not text:
+                continue
+
+            key = (
+                float(segment["start"]),
+                text
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            ordered.append({
+                "start": float(segment["start"]),
+                "end": float(segment["end"]),
+                "text": text
+            })
+
+    ordered.sort(
+        key=lambda piece: piece["start"]
+    )
+
+    groups = []
+
+    for first in range(len(ordered) - pieces + 1):
+
+        run = ordered[first:first + pieces]
+
+        consecutive = all(
+            later["start"] - earlier["end"] <= EVIDENCE_PIECE_GAP
+            for earlier, later in zip(run, run[1:])
+        )
+
+        if consecutive:
+
+            groups.append({
+                "start": run[0]["start"],
+                "end": run[-1]["end"],
+                "text": " ".join(
+                    piece["text"]
+                    for piece in run
+                )
+            })
+
+    # Too few consecutive pieces: single pieces, as before.
+    return groups or ordered
+
+
+def find_evidence(
+    results,
+    question,
+    answer,
+    embedding_model,
+    pieces=EVIDENCE_PIECES
+):
+
+    if not results or not answer:
+        return []
+
+    candidates = _evidence_candidates(
+        results,
+        pieces
+    )
+
+    if not candidates:
+        return []
+
+    sentences = (
+        _answer_sentences(answer)
+        or [str(answer)]
+    )
+
+    vectors = np.asarray(
+        embedding_model.encode(
+            [candidate["text"] for candidate in candidates],
+            normalize_embeddings=True
+        ),
+        dtype="float32"
+    )
+
+    query_vectors = np.asarray(
+        embedding_model.encode(
+            [str(question)] + sentences,
+            normalize_embeddings=True
+        ),
+        dtype="float32"
+    )
+
+    question_similarity = vectors @ query_vectors[0]
+
+    # For each candidate: the answer sentence it matches best.
+    answer_similarity = np.max(
+        vectors @ query_vectors[1:].T,
+        axis=1
+    )
+
+    scores = (
+        0.5 * question_similarity
+        + 0.5 * answer_similarity
+    )
+
+    best = int(np.argmax(scores))
+
+    evidence = dict(candidates[best])
+    evidence["score"] = float(scores[best])
+
+    return [evidence]

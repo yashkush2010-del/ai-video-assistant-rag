@@ -9,17 +9,21 @@
 #      also matches "labeled" and "labels")
 #   - NOT_IN_VIDEO : the video does not answer this question, so the
 #     right answer is "I don't have enough information in the video."
+#   - an optional third part gives where the video says it
+#     (m:ss-m:ss, several separated by commas): the evidence / Jump
+#     time is correct when it starts inside one of these windows.
+#     Only scripts/check_qa_real_video.py and check_evidence.py use it.
 # Lines starting with # are ignored.
 
-What is machine learning? | learn ; data/experience ; predict/train/model
-How does Paul decide whether he likes a song? | tempo ; intensity ; genre/gender/voice
-How did the video decide whether Paul likes song B? | vote/majority ; circle/neighbo/nearest/four/4
-What does supervised learning use to train the model? | label
-In the coin example, what is the feature and what is the label? | weight ; currenc
-What is unsupervised learning? | unlabel/no label/without label/not labeled/not labelled ; cluster/pattern/group
-What is reinforcement learning? | reward ; feedback
-Why is machine learning possible today? | data ; memory ; comput/processing power
-What are some applications of machine learning? | health/diagnos ; sentiment/social media ; fraud ; churn/e-commerce/surge/uber
-How does Uber use machine learning? | surge/pricing ; demand ; predict
+What is machine learning? | learn ; data/experience ; predict/train/model | 0:06-0:17, 2:29-2:41
+How does Paul decide whether he likes a song? | tempo ; intensity ; genre/gender/voice | 0:31-0:38
+How did the video decide whether Paul likes song B? | vote/majority ; circle/neighbo/nearest/four/4 | 2:01-2:13
+What does supervised learning use to train the model? | label | 3:15-3:44
+In the coin example, what is the feature and what is the label? | weight ; currenc | 3:12-3:17
+What is unsupervised learning? | unlabel/no label/without label/not labeled/not labelled ; cluster/pattern/group | 3:56-4:31
+What is reinforcement learning? | reward ; feedback | 4:37-5:03
+Why is machine learning possible today? | data ; memory ; comput/processing power | 5:54-6:24
+What are some applications of machine learning? | health/diagnos ; sentiment/social media ; fraud ; churn/e-commerce/surge/uber | 6:24-6:45
+How does Uber use machine learning? | surge/pricing ; demand ; predict | 6:55-7:24
 What is deep learning? | NOT_IN_VIDEO
 Which programming language does the video use? | NOT_IN_VIDEO

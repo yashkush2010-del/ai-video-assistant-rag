@@ -6,7 +6,7 @@ OWN Q&A code, exactly as app.py does:
 
     MiniLM question embedding -> retrieve_chunks (k=6, threshold 0.25)
     -> add_neighbouring_chunks -> prepare_context -> generate_answer (Ollama)
-    -> find_answer_segments (the evidence and Jump time)
+    -> find_evidence (the evidence and Jump time)
 
 and checks every answer for the key facts it should contain. The
 questions and their key facts are in scripts/qa_questions/*.txt (the
@@ -54,7 +54,7 @@ from src.rag.answer_generator import (  # noqa: E402
 from src.rag.vector_store import (  # noqa: E402
     add_neighbouring_chunks,
     create_index,
-    find_answer_segments,
+    find_evidence,
     retrieve_chunks,
 )
 from src.rag.video_summary import format_time_range  # noqa: E402
@@ -104,12 +104,15 @@ def read_questions(path):
             if "|" not in line:
                 sys.exit(f"No '|' in question line: {line}")
 
-            question, facts = (part.strip() for part in line.split("|", 1))
+            parts = [part.strip() for part in line.split("|")]
+            question, facts = parts[0], parts[1]
+            windows = parse_windows(parts[2]) if len(parts) > 2 else []
 
             if facts == NOT_IN_VIDEO:
-                questions.append(
-                    {"question": question, "facts": [], "answerable": False}
-                )
+                questions.append({
+                    "question": question, "facts": [], "answerable": False,
+                    "windows": [],
+                })
                 continue
 
             questions.append({
@@ -120,9 +123,37 @@ def read_questions(path):
                     if fact.strip()
                 ],
                 "answerable": True,
+                "windows": windows,
             })
 
     return video_path, questions
+
+
+def _seconds(clock):
+    seconds = 0
+    for part in clock.strip().split(":"):
+        seconds = seconds * 60 + int(part)
+    return seconds
+
+
+def parse_windows(text):
+    """'0:06-0:17, 2:29-2:41' -> [(6, 17), (149, 161)]"""
+    windows = []
+
+    for window in text.split(","):
+        if "-" in window:
+            start, end = window.split("-", 1)
+            windows.append((_seconds(start), _seconds(end)))
+
+    return windows
+
+
+def evidence_correct(start, windows):
+    """None when there is no window to check against."""
+    if not windows:
+        return None
+
+    return any(first <= int(start) < last for first, last in windows)
 
 
 # ============================================================
@@ -248,8 +279,8 @@ def ask_all(video_path, questions):
 
         evidence = []
         if NO_INFORMATION not in _normalise(answer):
-            evidence = find_answer_segments(
-                retrieved, answer, embedding_model, max_segments=1
+            evidence = find_evidence(
+                retrieved, item["question"], answer, embedding_model
             )
 
         verdict, found, missing = grade(item, answer)
@@ -257,6 +288,10 @@ def ask_all(video_path, questions):
         results.append({
             "question": item["question"],
             "answerable": item["answerable"],
+            "evidence_correct": (
+                evidence_correct(evidence[0]["start"], item["windows"])
+                if evidence else None
+            ),
             "answer": answer.strip(),
             "verdict": verdict,
             "found": [fact[0] for fact in found],
@@ -299,7 +334,12 @@ def report_text(video_path, label, results):
             lines.append(f"  Missing  : {'; '.join(result['missing'])}")
 
         for evidence in result["evidence"]:
-            lines.append(f"  Evidence : [{evidence['time']}] {evidence['text']}")
+            mark = {True: "  (right place)", False: "  (WRONG place)"}.get(
+                result.get("evidence_correct"), ""
+            )
+            lines.append(
+                f"  Evidence : [{evidence['time']}] {evidence['text']}{mark}"
+            )
 
         lines.append(
             "  Searched : "
@@ -311,9 +351,16 @@ def report_text(video_path, label, results):
     for result in results:
         counts[result["verdict"]] = counts.get(result["verdict"], 0) + 1
 
+    checked = [r["evidence_correct"] for r in results if r.get("evidence_correct") is not None]
+    evidence_line = (
+        f"Evidence at the right place: {sum(checked)} / {len(checked)}"
+        if checked else "Evidence: no windows to check"
+    )
+
     lines += [
         "",
         "=" * 70,
+        evidence_line,
         f"SCORE: {total:g} / {len(results)}   "
         + "   ".join(f"{verdict} {count}" for verdict, count in sorted(counts.items())),
         f"Average answer time: "
