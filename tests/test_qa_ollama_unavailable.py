@@ -254,13 +254,15 @@ def test_an_old_answer_is_not_left_on_screen(env, monkeypatch):
         lambda **kwargs: {"message": {"content": "An earlier answer."}}
     )
 
-    at = ask(at, "First question?")
+    # Questions the test video is about: a question that matches
+    # nothing is answered "no information" without asking Ollama.
+    at = ask(at, "What is machine learning?")
 
     assert at.session_state["last_answer"] == "An earlier answer."
 
     ollama_down(monkeypatch)
 
-    at = ask(at, "Second question?")
+    at = ask(at, "What does supervised learning use?")
 
     assert at.session_state["last_answer"] is None
     assert "An earlier answer." not in page_text(at)

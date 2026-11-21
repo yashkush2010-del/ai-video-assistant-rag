@@ -1,0 +1,25 @@
+# Q&A test questions for the machine learning video.
+#
+# video: data/videos/machine_learning.mp4
+#
+# Each line:   question | key fact ; key fact ; ...
+#   - every key fact must appear in a good answer
+#   - "/" separates words that count as the same fact
+#     (supervis/label : a word only has to START with it, so "label"
+#      also matches "labeled" and "labels")
+#   - NOT_IN_VIDEO : the video does not answer this question, so the
+#     right answer is "I don't have enough information in the video."
+# Lines starting with # are ignored.
+
+What is machine learning? | learn ; data/experience ; predict/train/model
+How does Paul decide whether he likes a song? | tempo ; intensity ; genre/gender/voice
+How did the video decide whether Paul likes song B? | vote/majority ; circle/neighbo/nearest/four/4
+What does supervised learning use to train the model? | label
+In the coin example, what is the feature and what is the label? | weight ; currenc
+What is unsupervised learning? | unlabel/no label/without label/not labeled/not labelled ; cluster/pattern/group
+What is reinforcement learning? | reward ; feedback
+Why is machine learning possible today? | data ; memory ; comput/processing power
+What are some applications of machine learning? | health/diagnos ; sentiment/social media ; fraud ; churn/e-commerce/surge/uber
+How does Uber use machine learning? | surge/pricing ; demand ; predict
+What is deep learning? | NOT_IN_VIDEO
+Which programming language does the video use? | NOT_IN_VIDEO

@@ -1,0 +1,18 @@
+# Q&A test questions for "How the Internet Works in 5 Minutes"
+# (https://www.youtube.com/watch?v=7_LPdttKXPc), opened in the app
+# with the YouTube option.
+#
+# video: data/youtube/7_LPdttKXPc.mp4
+#
+# Same format as machine_learning.txt.
+
+What is the Internet, according to the video? | wire/cable ; ground/buried/fiber/fibre/copper
+What is a server? | computer ; directly ; web page/webpage/files
+What is an IP address used for? | address ; find/locate/identif
+Why is a home computer called a client? | indirect/not connected directly/isn't connected directly ; service provider/isp
+What are packets? | piece ; reassembl/put back together/original order
+What does a router do? | direct/route/guide/help ; packet ; destination/closer/next
+How many routers may help your packets when you visit a website? | 10 ; 15
+How does an email get from Gmail to Aunt Ruth? | gmail ; aol ; retriev/dial/next day/download
+What is HTTPS? | NOT_IN_VIDEO
+How fast is a fiber optic connection? | NOT_IN_VIDEO

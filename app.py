@@ -19,6 +19,7 @@ from src.processing.keyframe_extractor import (
 from src.rag.vector_store import (
     create_index,
     retrieve_chunks,
+    add_neighbouring_chunks,
     find_answer_segments
 )
 
@@ -1588,6 +1589,13 @@ if (
                 query_embedding,
                 k=6,
                 threshold=0.25
+            )
+
+            # Also the chunk before and after every match, so a
+            # sentence cut between two chunks is complete again.
+            results = add_neighbouring_chunks(
+                results,
+                chunks
             )
 
 

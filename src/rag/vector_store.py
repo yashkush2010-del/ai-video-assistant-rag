@@ -119,6 +119,11 @@ def retrieve_chunks(
 
         results.append({
             "score": similarity,
+            # Its position in the video, so the pieces next to it
+            # can be found (add_neighbouring_chunks).
+            "chunk_index": int(
+                chunk_index
+            ),
             "start": float(
                 chunk["start"]
             ),
@@ -139,6 +144,111 @@ def retrieve_chunks(
     )
 
     return results
+
+
+# ============================================================
+# ADD NEIGHBOURING CHUNKS
+# ============================================================
+#
+# The video is cut into chunks of about 20 seconds, and the cut often
+# falls in the middle of a sentence or an explanation. Real example:
+#
+#     chunk 1: "... Paul decides this on the basis of the song's tempo,"
+#     chunk 2: "genre, intensity and the gender of voice. ..."
+#
+# The search found chunk 1 but not chunk 2, so the answer only named
+# the tempo. For every chunk the search finds, the chunk just before
+# and just after it are added too, so a sentence or a story is never
+# cut in half. The best matches are expanded first, and the total is
+# capped so the context stays a size the language model handles well.
+# (12 made answers slower; 9 still kept every neighbour that fixed an
+# answer in scripts/check_qa_real_video.py.)
+
+MAX_CONTEXT_CHUNKS = 9
+
+
+def add_neighbouring_chunks(
+    results,
+    chunks,
+    max_chunks=MAX_CONTEXT_CHUNKS
+):
+
+    # Results without a position cannot be expanded: unchanged.
+    if not any(
+        "chunk_index" in result
+        for result in results
+    ):
+        return list(results)
+
+    chosen = []
+
+    def add(chunk_index, score):
+
+        if len(chosen) >= max_chunks:
+            return
+
+        if not 0 <= chunk_index < len(chunks):
+            return
+
+        if any(
+            item["chunk_index"] == chunk_index
+            for item in chosen
+        ):
+            return
+
+        chunk = chunks[chunk_index]
+
+        chosen.append({
+            # A neighbour gets the score of the match it belongs to.
+            "score": score,
+            "chunk_index": chunk_index,
+            "start": float(
+                chunk["start"]
+            ),
+            "end": float(
+                chunk["end"]
+            ),
+            "text": chunk["text"],
+            "segments": chunk.get(
+                "segments",
+                []
+            )
+        })
+
+    # Every match first (best first), so a neighbour can never push
+    # out a real match ...
+    for result in results:
+
+        if "chunk_index" in result:
+
+            add(
+                result["chunk_index"],
+                result["score"]
+            )
+
+    # ... then their neighbours, again best match first.
+    for result in results:
+
+        if "chunk_index" not in result:
+            continue
+
+        for neighbour in (
+            result["chunk_index"] - 1,
+            result["chunk_index"] + 1
+        ):
+
+            add(
+                neighbour,
+                result["score"]
+            )
+
+    # In the order of the video, so the language model reads the
+    # transcript as it was spoken.
+    chosen.sort(
+        key=lambda item: item["start"]
+    )
+
+    return chosen
 
 
 # ============================================================
