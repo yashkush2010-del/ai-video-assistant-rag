@@ -41,6 +41,8 @@ from src.rag.viva import (
     viva_score
 )
 
+from src.processing import processing_cache
+
 from src.ingestion.youtube_loader import (
     DEFAULT_CACHE_DIR as YOUTUBE_CACHE_DIR,
     YouTubeError,
@@ -77,15 +79,22 @@ st.write(
 # LOAD MODELS
 # ============================================================
 
+# The model names are also part of the processing cache key: a result
+# made with another model is never reused.
+WHISPER_MODEL_NAME = "base"
+
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
+
 @st.cache_resource
 def load_models():
 
     whisper_model = whisper.load_model(
-        "base"
+        WHISPER_MODEL_NAME
     )
 
     embedding_model = SentenceTransformer(
-        "all-MiniLM-L6-v2"
+        EMBEDDING_MODEL_NAME
     )
 
     return (
@@ -558,30 +567,6 @@ if video_source is not None:
 
 
         # ====================================================
-        # EXTRACT AUDIO
-        # ====================================================
-
-        audio_path = os.path.join(
-            "data",
-            "audio",
-            "sample.wav"
-        )
-
-        with st.spinner(
-            "Extracting audio from video..."
-        ):
-
-            extract_audio(
-                video_path,
-                audio_path
-            )
-
-        st.success(
-            "Audio extracted successfully!"
-        )
-
-
-        # ====================================================
         # LOAD MODELS
         # ====================================================
 
@@ -596,27 +581,80 @@ if video_source is not None:
 
 
         # ====================================================
-        # TRANSCRIPTION
+        # CACHED TRANSCRIPT
         # ====================================================
+        #
+        # Whisper is the slowest step. If this exact video was
+        # transcribed before (with the same Whisper model), its
+        # saved transcript is used and audio extraction and
+        # Whisper are skipped. See src/processing/processing_cache.py.
 
-        with st.spinner(
-            "Transcribing video..."
-        ):
+        segments = processing_cache.load_transcript(
+            video_hash,
+            WHISPER_MODEL_NAME
+        )
 
-            result = whisper_model.transcribe(
-                audio_path
+        if segments is not None:
+
+            st.success(
+                "Transcript loaded from cache "
+                "(this video was processed before)."
             )
 
-        segments = result[
-            "segments"
-        ]
+        else:
+
+            # ================================================
+            # EXTRACT AUDIO
+            # ================================================
+
+            audio_path = os.path.join(
+                "data",
+                "audio",
+                "sample.wav"
+            )
+
+            with st.spinner(
+                "Extracting audio from video..."
+            ):
+
+                extract_audio(
+                    video_path,
+                    audio_path
+                )
+
+            st.success(
+                "Audio extracted successfully!"
+            )
+
+
+            # ================================================
+            # TRANSCRIPTION
+            # ================================================
+
+            with st.spinner(
+                "Transcribing video..."
+            ):
+
+                result = whisper_model.transcribe(
+                    audio_path
+                )
+
+            segments = result[
+                "segments"
+            ]
+
+            processing_cache.save_transcript(
+                video_hash,
+                WHISPER_MODEL_NAME,
+                segments
+            )
+
+            st.success(
+                "Transcription completed!"
+            )
 
         st.session_state.segments = (
             segments
-        )
-
-        st.success(
-            "Transcription completed!"
         )
 
 
@@ -832,6 +870,45 @@ if st.session_state.video_data is not None:
             st.rerun()
 
 
+    # ========================================================
+    # REPROCESS VIDEO
+    # ========================================================
+    #
+    # A video that was processed before is loaded from the cache.
+    # This button deletes its cached transcript and summary and
+    # processes the video again from the beginning.
+    #
+    # Only offered while the video can still be read again (not
+    # after the uploaded file was removed from the uploader).
+
+    if video_source is not None and st.button(
+        "🔄 Reprocess video",
+        key="reprocess_video",
+        help=(
+            "Run transcription and the summary again "
+            "instead of using the saved results."
+        )
+    ):
+
+        processing_cache.clear_video(
+            st.session_state.video_hash
+        )
+
+        # A different hash makes the block above process the
+        # video again on the next run.
+        st.session_state.video_hash = None
+
+        st.session_state.video_summary = None
+
+        st.session_state.viva = None
+
+        st.session_state.viva_index = 0
+
+        st.session_state.viva_results = {}
+
+        st.rerun()
+
+
 # ============================================================
 # VIDEO SUMMARY
 # ============================================================
@@ -859,23 +936,41 @@ if (
         != st.session_state.video_hash
     ):
 
-        with st.spinner(
-            "Generating video summary..."
-        ):
+        # A summary Ollama wrote earlier for exactly these chunks
+        # is reused instead of asking Ollama again.
+        new_summary = processing_cache.load_summary(
+            st.session_state.video_hash,
+            EMBEDDING_MODEL_NAME,
+            st.session_state.chunks
+        )
 
-            # A failure here must never break the rest of the app.
-            try:
-                new_summary = generate_video_summary(
-                    st.session_state.chunks,
-                    st.session_state.embedding_model
-                )
-            except Exception:
-                new_summary = {
-                    "main_topic": "",
-                    "points": [],
-                    "used_llm": False,
-                    "error": True
-                }
+        if new_summary is None:
+
+            with st.spinner(
+                "Generating video summary..."
+            ):
+
+                # A failure here must never break the rest of the app.
+                try:
+                    new_summary = generate_video_summary(
+                        st.session_state.chunks,
+                        st.session_state.embedding_model
+                    )
+                except Exception:
+                    new_summary = {
+                        "main_topic": "",
+                        "points": [],
+                        "used_llm": False,
+                        "error": True
+                    }
+
+            # (Only kept when Ollama really wrote it.)
+            processing_cache.save_summary(
+                st.session_state.video_hash,
+                EMBEDDING_MODEL_NAME,
+                st.session_state.chunks,
+                new_summary
+            )
 
         st.session_state.video_summary = {
             "video_hash": st.session_state.video_hash,

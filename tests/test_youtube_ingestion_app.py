@@ -307,7 +307,10 @@ def test_the_pipeline_receives_the_same_kind_of_input_for_upload_and_youtube(env
         values.clear()
 
     env.upload["file"] = None
-    env.fake_youtube()
+
+    # Another video: the same one would now (correctly) be loaded from
+    # the processing cache, and these stages would not run at all.
+    env.fake_youtube(different_video=True)
 
     at = env.start()
     env.process_youtube(at)
