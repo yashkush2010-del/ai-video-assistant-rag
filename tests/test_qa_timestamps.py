@@ -122,8 +122,10 @@ def render_qa(monkeypatch):
     def render(segments):
         at = AppTest.from_file(str(APP), default_timeout=60)
 
-        # The Q&A section is shown once the video has been indexed and a
-        # question has been answered; nothing else is needed to show it.
+        # The Q&A section is shown next to a loaded, indexed video once a
+        # question has been answered (it is the section open by default).
+        at.session_state["video_data"] = b"not a real video"
+        at.session_state["video_name"] = "lecture"
         at.session_state["index"] = object()
         at.session_state["last_question"] = "What is machine learning?"
         at.session_state["last_answer"] = "Machine learning lets computers learn."
@@ -153,10 +155,10 @@ def jump_buttons(at):
 def test_qa_evidence_shows_minutes_and_seconds(render_qa):
     at, _ = render_qa([evidence(387.6, 390.6)])
 
-    # the evidence headings ("###"); "## Relevant Timestamps" is the section title
-    headings = [t for t in markdown_texts(at) if t.startswith("### ")]
+    # the evidence headings ("#####"); "#### Relevant Timestamps" is the section title
+    headings = [t for t in markdown_texts(at) if t.startswith("##### ")]
 
-    assert headings == ["### \u23f1\ufe0f 6:27 \u2013 6:30"]
+    assert headings == ["##### \u23f1\ufe0f 6:27 \u2013 6:30"]
 
     # the old seconds format is gone from the heading
     assert "387.6" not in headings[0]
@@ -186,7 +188,7 @@ def test_qa_evidence_for_each_kind_of_timestamp(
 ):
     at, _ = render_qa([evidence(start, end)])
 
-    assert f"### \u23f1\ufe0f {heading}" in markdown_texts(at)
+    assert f"##### \u23f1\ufe0f {heading}" in markdown_texts(at)
 
     buttons = jump_buttons(at)
 
@@ -221,16 +223,15 @@ def test_qa_everything_else_is_unchanged(render_qa):
 
     shown = markdown_texts(at)
 
-    assert "## \u23f1\ufe0f Relevant Timestamps" in shown
+    assert "#### \u23f1\ufe0f Relevant Timestamps" in shown
     assert "Machine learning is used in healthcare." in shown
 
-    # the caption under the evidence still reports whole seconds
+    # the caption under the evidence uses minutes:seconds too
+    # (it used to say "approximately 387 seconds")
     captions = [c.value for c in at.caption]
 
-    assert (
-        "Video evidence starts at approximately 387 seconds "
-        "and ends at 390 seconds." in captions
-    )
+    assert "Video evidence: 6:27 \u2013 6:30" in captions
+    assert not any("seconds" in caption for caption in captions)
 
 
 def test_qa_with_several_evidence_segments(render_qa):

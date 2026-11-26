@@ -291,8 +291,14 @@ def test_the_downloaded_file_is_passed_into_the_same_pipeline(env):
     assert len(at.session_state["chunks"]) >= 1
     assert at.session_state["multimodal_records"] is not None
 
-    # the video summary is built from it too
-    assert any("Video Summary" in str(e.label) for e in at.expander)
+    # the video summary is built from it too (shown in its section)
+    assert at.session_state["video_summary"] is not None
+    at.button_group(key="section").set_value("\U0001f4cb Summary")
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any(
+        "Jump to" in str(button.label) for button in at.button
+    ) or "Not enough spoken content" in page_text(at)
 
     assert at.session_state["active_source"] == "youtube"
 

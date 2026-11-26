@@ -1,0 +1,13 @@
+# Look of the AI Video Assistant (read by Streamlit on start).
+
+[theme]
+base = "dark"
+primaryColor = "#8B5CF6"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1A1D2B"
+textColor = "#E6E6EF"
+font = "sans serif"
+baseRadius = "medium"
+
+[client]
+toolbarMode = "minimal"

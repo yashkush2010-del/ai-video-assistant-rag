@@ -206,6 +206,8 @@ def test_reprocess_runs_whisper_and_the_summary_again(env, ollama_summary):
 def test_reprocess_starts_a_new_viva(env):
     at = open_upload(env)
 
+    at.button_group(key="section").set_value("\U0001f393 Viva")
+    at.run()
     at.button(key="viva_generate").click()
     at.run()
     assert at.session_state["viva"] is not None

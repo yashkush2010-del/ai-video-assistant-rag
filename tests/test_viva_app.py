@@ -14,6 +14,13 @@ from test_youtube_ingestion_app import (  # noqa: F401
 )
 
 
+def open_section(at, name):
+    at.button_group(key="section").set_value(name)
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    return at
+
+
 def start_with_upload(env):
     env.set_upload("lecture.mp4")
 
@@ -21,7 +28,8 @@ def start_with_upload(env):
 
     assert "Video processing completed!" in page_text(at)
 
-    return at
+    # Viva is one of the sections next to the video.
+    return open_section(at, "\U0001f393 Viva")
 
 
 def click(at, key):
@@ -57,6 +65,8 @@ def test_viva_mode_does_not_change_the_rest_of_the_app(env):
     # Summary, keyframes and Q&A are all still there.
     assert at.session_state["video_summary"] is not None
     assert at.session_state["index"] is not None
+
+    at = open_section(at, "\U0001f4ac Ask Questions")
     assert any("Ask Questions" in str(m.value) for m in at.markdown)
 
 
@@ -218,10 +228,16 @@ def test_a_failure_while_generating_does_not_break_the_app(env, monkeypatch):
     assert at.session_state["viva"]["error"] is True
     assert "could not be generated" in page_text(at)
 
-    # The rest of the app is still there.
-    assert any("Ask Questions" in str(m.value) for m in at.markdown)
-
     # And it can be tried again.
+    at = click(at, "viva_retry")
+
+    assert at.session_state["viva"] is None
+
+    # The rest of the app is still there.
+    at = generate(at)
+    at = open_section(at, "\U0001f4ac Ask Questions")
+    assert any("Ask Questions" in str(m.value) for m in at.markdown)
+    at = open_section(at, "\U0001f393 Viva")
     at = click(at, "viva_retry")
 
     assert at.session_state["viva"] is None

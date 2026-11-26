@@ -70,10 +70,86 @@ st.set_page_config(
 
 st.title("🎥 AI Video Assistant")
 
-st.write(
-    "Upload a video and ask questions about its content using "
-    "RAG, timestamped transcripts, and keyframes."
+st.caption(
+    "Ask questions about a video, get a timestamped summary and test "
+    "yourself in a viva. Every answer points to the moment in the "
+    "video it comes from."
 )
+
+
+# ============================================================
+# LOOK
+# ============================================================
+#
+# Colours and fonts are in .streamlit/config.toml. These few rules
+# only shape what the theme cannot (title size, caption contrast,
+# button hover, rounded and sticky video). If a future Streamlit
+# version changes its page structure, a rule simply stops applying.
+
+st.markdown(
+    """
+    <style>
+    /* A slightly smaller title, so the video is visible at once. */
+    h1 {
+        font-size: 2.2rem !important;
+    }
+    /* Secondary text (captions) a little brighter on the dark theme. */
+    div[data-testid="stCaptionContainer"] {
+        color: rgba(230, 230, 239, 0.78);
+    }
+    /* Buttons: a subtle violet border on hover. */
+    div.stButton > button:hover,
+    div.stFormSubmitButton > button:hover {
+        border-color: #8B5CF6;
+        color: #C4B5FD;
+    }
+    /* Rounded video. */
+    div[data-testid="stVideo"] video {
+        border-radius: 12px;
+    }
+    /* The video stays in view while a long section is scrolled. */
+    div[data-testid="stHorizontalBlock"]:has(div[data-testid="stVideo"]) {
+        align-items: flex-start;
+    }
+    div[data-testid="stColumn"]:has(div[data-testid="stVideo"]) {
+        position: sticky;
+        top: 3.75rem;
+        z-index: 1;
+    }
+    /* On a narrow screen the columns are stacked: no sticky video. */
+    @media (max-width: 640px) {
+        div[data-testid="stColumn"]:has(div[data-testid="stVideo"]) {
+            position: static;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# Filled with the start screen only when no video is loaded. Created
+# this early so that, when a video starts processing, the start screen
+# of the previous run disappears at once instead of staying faded
+# under the progress box.
+welcome_slot = st.empty()
+
+
+# ============================================================
+# SECTIONS
+# ============================================================
+
+SECTION_ASK = "💬 Ask Questions"
+
+SECTION_SUMMARY = "📋 Summary"
+
+SECTION_VIVA = "🎓 Viva"
+
+SECTIONS = [
+    SECTION_ASK,
+    SECTION_SUMMARY,
+    SECTION_VIVA
+]
 
 
 # ============================================================
@@ -87,7 +163,9 @@ WHISPER_MODEL_NAME = "base"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 
-@st.cache_resource
+# show_spinner=False: the processing box already says "Loading AI
+# models..." (Streamlit's own message overlapped it).
+@st.cache_resource(show_spinner=False)
 def load_models():
 
     whisper_model = whisper.load_model(
@@ -236,6 +314,78 @@ def seek_video_player(seconds, request_id):
 
 
 # ============================================================
+# EXAMPLE QUESTIONS
+# ============================================================
+#
+# Up to three questions built from the titles of the Video Summary
+# points ("Types of Machine Learning" -> "What does the video say
+# about types of machine learning?"), so the Q&A can be tried with
+# one click. Only titles the language model wrote are used.
+
+MAX_EXAMPLE_QUESTIONS = 3
+
+
+def make_example_questions(video_summary):
+
+    if not video_summary:
+        return []
+
+    summary = video_summary.get("summary") or {}
+
+    if not summary.get("used_llm"):
+        return []
+
+    examples = []
+
+    for point in summary.get("points", []):
+
+        title = " ".join(
+            str(point.get("title", "")).split()
+        ).rstrip(".?!")
+
+        if len(title.split()) < 2:
+            continue
+
+        # "Types Of Data" -> "types of data"; "AI" stays "AI".
+        title = " ".join(
+            word if len(word) > 1 and word.isupper() else word.lower()
+            for word in title.split()
+        )
+
+        example = f"What does the video say about {title}?"
+
+        if example.lower() not in (e.lower() for e in examples):
+            examples.append(example)
+
+        if len(examples) == MAX_EXAMPLE_QUESTIONS:
+            break
+
+    return examples
+
+
+# ============================================================
+# SHORTEN TEXT
+# ============================================================
+#
+# Summary cards show a short piece of the transcript (the full
+# passage is in the video). Cut at a word, never in the middle of one.
+
+SHORT_TEXT_CHARS = 220
+
+
+def shorten_text(text, limit=SHORT_TEXT_CHARS):
+
+    text = " ".join(
+        str(text).split()
+    )
+
+    if len(text) <= limit:
+        return text
+
+    return text[:limit].rsplit(" ", 1)[0] + " …"
+
+
+# ============================================================
 # JUMP REQUEST HELPER
 # ============================================================
 #
@@ -308,6 +458,18 @@ if "video_summary" not in st.session_state:
 
 # True for one rerun after a summary Jump, so the summary
 # section stays open instead of collapsing.
+# The open section (Ask Questions / Summary / Viva).
+if "section" not in st.session_state:
+    st.session_state.section = SECTION_ASK
+
+# Clicking the open section again un-selects it; then the last one
+# is shown again.
+if "last_section" not in st.session_state:
+    st.session_state.last_section = SECTION_ASK
+
+if st.session_state.section is None:
+    st.session_state.section = st.session_state.last_section
+
 if "summary_open" not in st.session_state:
     st.session_state.summary_open = False
 
@@ -356,93 +518,115 @@ if "qa_error" not in st.session_state:
     st.session_state.qa_error = None
 
 
-# ============================================================
-# VIDEO UPLOAD
-# ============================================================
+# The video is chosen in the sidebar, so the main page starts with
+# the video itself. st.file_uploader / st.text_input are called
+# inside "with st.sidebar:" (not st.sidebar.file_uploader), so
+# they stay the same Streamlit calls as before.
 
-uploaded_video = st.file_uploader(
-    "Upload a video",
-    type=[
-        "mp4",
-        "mov",
-        "avi",
-        "mkv"
-    ]
-)
+with st.sidebar:
+
+    st.markdown(
+        "### 📂 Choose a video"
+    )
+
+    # Upload and YouTube link together in one box.
+    source_box = st.container(border=True)
+
+with source_box:
+
+    # ============================================================
+    # VIDEO UPLOAD
+    # ============================================================
+
+    uploaded_video = st.file_uploader(
+        "Upload a video file",
+        type=[
+            "mp4",
+            "mov",
+            "avi",
+            "mkv"
+        ]
+    )
 
 
-# ============================================================
-# YOUTUBE URL  (an alternative to the upload above)
-# ============================================================
-#
-# A YouTube link is turned into a small local video file by
-# src/ingestion/youtube_loader.py. From there it goes through exactly
-# the same processing as an uploaded video: the block below only sees
-# a "video source" with a name and some bytes.
+    # ============================================================
+    # YOUTUBE URL  (an alternative to the upload above)
+    # ============================================================
+    #
+    # A YouTube link is turned into a small local video file by
+    # src/ingestion/youtube_loader.py. From there it goes through exactly
+    # the same processing as an uploaded video: the block below only sees
+    # a "video source" with a name and some bytes.
 
-youtube_url = st.text_input(
-    "Or paste a YouTube link",
-    key="youtube_url",
-    placeholder="https://www.youtube.com/watch?v=..."
-)
+    st.caption(
+        "or"
+    )
 
-process_youtube = st.button(
-    "Process YouTube Video",
-    key="process_youtube"
-)
+    youtube_url = st.text_input(
+        "Paste a YouTube link",
+        key="youtube_url",
+        placeholder="https://www.youtube.com/watch?v=..."
+    )
 
-# The video used is the one the user chose last: a newly uploaded
-# file, or a YouTube video that was just processed.
-upload_id = (
-    (uploaded_video.name, uploaded_video.size)
-    if uploaded_video is not None
-    else None
-)
+    process_youtube = st.button(
+        "Process YouTube Video",
+        key="process_youtube",
+        use_container_width=True
+    )
 
-if upload_id != st.session_state.last_upload_id:
+    # The video used is the one the user chose last: a newly uploaded
+    # file, or a YouTube video that was just processed.
+    upload_id = (
+        (uploaded_video.name, uploaded_video.size)
+        if uploaded_video is not None
+        else None
+    )
 
-    st.session_state.last_upload_id = upload_id
+    if upload_id != st.session_state.last_upload_id:
 
-    if upload_id is not None:
-        st.session_state.active_source = "upload"
-        st.session_state.youtube_source = None
+        st.session_state.last_upload_id = upload_id
+
+        if upload_id is not None:
+            st.session_state.active_source = "upload"
+            st.session_state.youtube_source = None
+            st.session_state.youtube_error = None
+
+    if process_youtube:
+
         st.session_state.youtube_error = None
 
-if process_youtube:
+        progress_text = st.empty()
+        progress_bar = st.progress(0.0)
 
-    st.session_state.youtube_error = None
+        def show_youtube_progress(stage, fraction=None):
 
-    progress_text = st.empty()
-    progress_bar = st.progress(0.0)
+            text, value = describe_progress(stage, fraction)
 
-    def show_youtube_progress(stage, fraction=None):
+            progress_text.write(text)
+            progress_bar.progress(value)
 
-        text, value = describe_progress(stage, fraction)
+        try:
+            youtube_video = fetch_youtube_video(
+                youtube_url,
+                cache_dir=YOUTUBE_CACHE_DIR,
+                on_progress=show_youtube_progress
+            )
 
-        progress_text.write(text)
-        progress_bar.progress(value)
+        except YouTubeError as error:
+            st.session_state.youtube_error = error.user_message
+            progress_text.empty()
 
-    try:
-        youtube_video = fetch_youtube_video(
-            youtube_url,
-            cache_dir=YOUTUBE_CACHE_DIR,
-            on_progress=show_youtube_progress
-        )
+        else:
+            st.session_state.youtube_source = (
+                YouTubeVideoSource(youtube_video)
+            )
+            st.session_state.active_source = "youtube"
 
-    except YouTubeError as error:
-        st.session_state.youtube_error = error.user_message
-        progress_text.empty()
+        progress_bar.empty()
 
-    else:
-        st.session_state.youtube_source = (
-            YouTubeVideoSource(youtube_video)
-        )
-        st.session_state.active_source = "youtube"
+    if st.session_state.youtube_error:
+        st.error(st.session_state.youtube_error)
 
-    progress_bar.empty()
-
-if st.session_state.youtube_error:
-    st.error(st.session_state.youtube_error)
 
 video_source = uploaded_video
 
@@ -453,6 +637,12 @@ if st.session_state.active_source == "youtube":
 # ============================================================
 # PROCESS VIDEO
 # ============================================================
+
+# A fixed place for the processing box, created on EVERY run (empty
+# when nothing is processed). Without it, the video and the panel
+# move up one place on the run after processing, and Streamlit then
+# shows the old page faded below the new one until the run ends.
+processing_slot = st.container()
 
 if video_source is not None:
 
@@ -558,367 +748,286 @@ if video_source is not None:
         st.session_state.qa_error = None
 
 
-        st.success(
-            getattr(
-                video_source,
-                "ready_message",
-                "Video uploaded successfully!"
-            )
-        )
+        # All processing steps are shown in one status box that
+        # collapses to "Video ready" when everything is done.
+        with processing_slot.status(
+            "Processing video...",
+            expanded=True
+        ) as processing_status:
 
-
-        # ====================================================
-        # LOAD MODELS
-        # ====================================================
-
-        with st.spinner(
-            "Loading AI models..."
-        ):
-
-            (
-                whisper_model,
-                embedding_model
-            ) = load_models()
-
-
-        # ====================================================
-        # CACHED TRANSCRIPT
-        # ====================================================
-        #
-        # Whisper is the slowest step. If this exact video was
-        # transcribed before (with the same Whisper model), its
-        # saved transcript is used and audio extraction and
-        # Whisper are skipped. See src/processing/processing_cache.py.
-
-        segments = processing_cache.load_transcript(
-            video_hash,
-            WHISPER_MODEL_NAME
-        )
-
-        if segments is not None:
-
-            st.success(
-                "Transcript loaded from cache "
-                "(this video was processed before)."
+            st.write(
+                "✅ "
+                + getattr(
+                    video_source,
+                    "ready_message",
+                    "Video uploaded successfully!"
+                )
             )
 
-        else:
 
-            # ================================================
-            # EXTRACT AUDIO
-            # ================================================
-
-            audio_path = os.path.join(
-                "data",
-                "audio",
-                "sample.wav"
-            )
+            # ====================================================
+            # LOAD MODELS
+            # ====================================================
 
             with st.spinner(
-                "Extracting audio from video..."
+                "Loading AI models..."
             ):
 
-                extract_audio(
-                    video_path,
-                    audio_path
-                )
-
-            st.success(
-                "Audio extracted successfully!"
-            )
+                (
+                    whisper_model,
+                    embedding_model
+                ) = load_models()
 
 
-            # ================================================
-            # TRANSCRIPTION
-            # ================================================
+            # ====================================================
+            # CACHED TRANSCRIPT
+            # ====================================================
+            #
+            # Whisper is the slowest step. If this exact video was
+            # transcribed before (with the same Whisper model), its
+            # saved transcript is used and audio extraction and
+            # Whisper are skipped. See src/processing/processing_cache.py.
 
-            with st.spinner(
-                "Transcribing video..."
-            ):
-
-                result = whisper_model.transcribe(
-                    audio_path
-                )
-
-            segments = result[
-                "segments"
-            ]
-
-            processing_cache.save_transcript(
+            segments = processing_cache.load_transcript(
                 video_hash,
-                WHISPER_MODEL_NAME,
+                WHISPER_MODEL_NAME
+            )
+
+            if segments is not None:
+
+                st.write(
+                    "✅ Transcript loaded from cache "
+                    "(this video was processed before)."
+                )
+
+            else:
+
+                # ================================================
+                # EXTRACT AUDIO
+                # ================================================
+
+                audio_path = os.path.join(
+                    "data",
+                    "audio",
+                    "sample.wav"
+                )
+
+                with st.spinner(
+                    "Extracting audio from video..."
+                ):
+
+                    extract_audio(
+                        video_path,
+                        audio_path
+                    )
+
+                st.write(
+                    "✅ Audio extracted successfully!"
+                )
+
+
+                # ================================================
+                # TRANSCRIPTION
+                # ================================================
+
+                with st.spinner(
+                    "Transcribing video..."
+                ):
+
+                    result = whisper_model.transcribe(
+                        audio_path
+                    )
+
+                segments = result[
+                    "segments"
+                ]
+
+                processing_cache.save_transcript(
+                    video_hash,
+                    WHISPER_MODEL_NAME,
+                    segments
+                )
+
+                st.write(
+                    "✅ Transcription completed!"
+                )
+
+            st.session_state.segments = (
                 segments
             )
 
-            st.success(
-                "Transcription completed!"
+
+            # ====================================================
+            # KEYFRAME EXTRACTION
+            # ====================================================
+
+            with st.spinner(
+                "Extracting video keyframes..."
+            ):
+
+                video_name = (
+                    st.session_state.video_name
+                )
+
+                keyframe_dir = os.path.join(
+                    "data",
+                    "keyframes",
+                    video_name
+                )
+
+                keyframes = extract_keyframes(
+                    video_path,
+                    keyframe_dir,
+                    interval=30
+                )
+
+            st.session_state.keyframes = (
+                keyframes
             )
 
-        st.session_state.segments = (
-            segments
-        )
-
-
-        # ====================================================
-        # KEYFRAME EXTRACTION
-        # ====================================================
-
-        with st.spinner(
-            "Extracting video keyframes..."
-        ):
-
-            video_name = (
-                st.session_state.video_name
+            st.write(
+                f"✅ Extracted {len(keyframes)} keyframes!"
             )
 
-            keyframe_dir = os.path.join(
+
+            # ====================================================
+            # MATCH KEYFRAMES WITH TRANSCRIPT
+            # ====================================================
+
+            with st.spinner(
+                "Matching keyframes with transcript..."
+            ):
+
+                matched_frames = (
+                    match_keyframes_with_transcript(
+                        keyframes,
+                        segments,
+                        tolerance=2.0
+                    )
+                )
+
+            st.write(
+                f"✅ Matched {len(matched_frames)} "
+                "keyframes with transcript segments!"
+            )
+
+
+            # ====================================================
+            # CREATE MULTIMODAL RECORDS
+            # ====================================================
+
+            multimodal_records = (
+                create_multimodal_records(
+                    matched_frames
+                )
+            )
+
+            st.session_state.multimodal_records = (
+                multimodal_records
+            )
+
+
+            # ====================================================
+            # SAVE MULTIMODAL RECORDS
+            # ====================================================
+
+            records_path = os.path.join(
                 "data",
-                "keyframes",
-                video_name
+                "processed",
+                f"{video_name}_multimodal_records.json"
             )
 
-            keyframes = extract_keyframes(
-                video_path,
-                keyframe_dir,
-                interval=30
-            )
+            with open(
+                records_path,
+                "w",
+                encoding="utf-8"
+            ) as file:
 
-        st.session_state.keyframes = (
-            keyframes
-        )
-
-        st.success(
-            f"Extracted {len(keyframes)} keyframes!"
-        )
-
-
-        # ====================================================
-        # MATCH KEYFRAMES WITH TRANSCRIPT
-        # ====================================================
-
-        with st.spinner(
-            "Matching keyframes with transcript..."
-        ):
-
-            matched_frames = (
-                match_keyframes_with_transcript(
-                    keyframes,
-                    segments,
-                    tolerance=2.0
+                json.dump(
+                    multimodal_records,
+                    file,
+                    indent=4,
+                    ensure_ascii=False
                 )
+
+            st.write(
+                "✅ Multimodal records saved successfully!"
             )
 
-        st.success(
-            f"Matched {len(matched_frames)} "
-            "keyframes with transcript segments!"
-        )
 
+            # ====================================================
+            # CREATE CHUNKS
+            # ====================================================
 
-        # ====================================================
-        # CREATE MULTIMODAL RECORDS
-        # ====================================================
-
-        multimodal_records = (
-            create_multimodal_records(
-                matched_frames
-            )
-        )
-
-        st.session_state.multimodal_records = (
-            multimodal_records
-        )
-
-
-        # ====================================================
-        # SAVE MULTIMODAL RECORDS
-        # ====================================================
-
-        records_path = os.path.join(
-            "data",
-            "processed",
-            f"{video_name}_multimodal_records.json"
-        )
-
-        with open(
-            records_path,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                multimodal_records,
-                file,
-                indent=4,
-                ensure_ascii=False
+            chunks = create_chunks(
+                segments
             )
 
-        st.success(
-            "Multimodal records saved successfully!"
-        )
 
+            # ====================================================
+            # CREATE EMBEDDINGS
+            # ====================================================
 
-        # ====================================================
-        # CREATE CHUNKS
-        # ====================================================
+            with st.spinner(
+                "Creating embeddings..."
+            ):
 
-        chunks = create_chunks(
-            segments
-        )
+                texts = [
+                    chunk["text"]
+                    for chunk in chunks
+                ]
 
-
-        # ====================================================
-        # CREATE EMBEDDINGS
-        # ====================================================
-
-        with st.spinner(
-            "Creating embeddings..."
-        ):
-
-            texts = [
-                chunk["text"]
-                for chunk in chunks
-            ]
-
-            embeddings = (
-                embedding_model.encode(
-                    texts,
-                    normalize_embeddings=True
+                embeddings = (
+                    embedding_model.encode(
+                        texts,
+                        normalize_embeddings=True
+                    )
                 )
+
+
+            # ====================================================
+            # CREATE FAISS INDEX
+            # ====================================================
+
+            index = create_index(
+                embeddings
             )
 
 
-        # ====================================================
-        # CREATE FAISS INDEX
-        # ====================================================
+            # ====================================================
+            # STORE IN SESSION STATE
+            # ====================================================
 
-        index = create_index(
-            embeddings
-        )
+            st.session_state.chunks = (
+                chunks
+            )
 
+            st.session_state.index = (
+                index
+            )
 
-        # ====================================================
-        # STORE IN SESSION STATE
-        # ====================================================
+            st.session_state.embedding_model = (
+                embedding_model
+            )
 
-        st.session_state.chunks = (
-            chunks
-        )
+            st.write(
+                "✅ Video processing completed!"
+            )
 
-        st.session_state.index = (
-            index
-        )
-
-        st.session_state.embedding_model = (
-            embedding_model
-        )
-
-        st.success(
-            "Video processing completed!"
-        )
+            processing_status.update(
+                label="✅ Video ready",
+                state="complete",
+                expanded=False
+            )
 
 
 # ============================================================
-# VIDEO PLAYER
-# ============================================================
-
-if st.session_state.video_data is not None:
-
-    st.markdown(
-        "## 🎬 Video Player"
-    )
-
-
-    # ========================================================
-    # IMPORTANT:
-    # USE jump_time AS THE VIDEO START TIME
-    # ========================================================
-
-    current_start_time = (
-        st.session_state.jump_time
-        if st.session_state.jump_time is not None
-        else 0
-    )
-
-    st.video(
-        st.session_state.video_data,
-        start_time=current_start_time
-    )
-
-
-    # ========================================================
-    # SHOW CURRENT JUMP INFORMATION
-    # ========================================================
-
-    if st.session_state.jump_time is not None:
-
-        jump_time = (
-            st.session_state.jump_time
-        )
-
-        # jump_time is the POSITION in the video (in seconds), shown
-        # as m:ss like every other timestamp: 173 -> "2:53".
-        st.success(
-            f"🎯 Video opened at "
-            f"{format_timestamp(jump_time)}."
-        )
-
-        if st.button(
-            "⬅️ Return to Beginning"
-        ):
-
-            st.session_state.jump_time = None
-
-            st.rerun()
-
-
-    # ========================================================
-    # REPROCESS VIDEO
-    # ========================================================
-    #
-    # A video that was processed before is loaded from the cache.
-    # This button deletes its cached transcript and summary and
-    # processes the video again from the beginning.
-    #
-    # Only offered while the video can still be read again (not
-    # after the uploaded file was removed from the uploader).
-
-    if video_source is not None and st.button(
-        "🔄 Reprocess video",
-        key="reprocess_video",
-        help=(
-            "Run transcription and the summary again "
-            "instead of using the saved results."
-        )
-    ):
-
-        processing_cache.clear_video(
-            st.session_state.video_hash
-        )
-
-        # A different hash makes the block above process the
-        # video again on the next run.
-        st.session_state.video_hash = None
-
-        st.session_state.video_summary = None
-
-        st.session_state.viva = None
-
-        st.session_state.viva_index = 0
-
-        st.session_state.viva_results = {}
-
-        st.rerun()
-
-
-# ============================================================
-# VIDEO SUMMARY
+# VIDEO SUMMARY (GENERATION)
 # ============================================================
 #
-# Isolated feature. The logic is in src/rag/video_summary.py.
-#
-# Every summary point uses the start, end and text of a real
-# transcript chunk (nothing is invented), and its Jump button
-# uses the same seek/autoplay mechanism as the other Jump buttons.
+# Made right after processing (or loaded from the cache), whichever
+# section is open, so it is ready when the Summary or Viva section
+# is opened. Displayed further below, in the Summary section.
 
 if (
     st.session_state.chunks is not None
@@ -978,26 +1087,222 @@ if (
             "summary": new_summary
         }
 
+
+# ============================================================
+# VIDEO PLAYER
+# ============================================================
+
+if st.session_state.video_data is not None:
+
+    # The video on the left, the open section on the right, so an
+    # answer, a summary point or a viva question and its Jump time
+    # are always next to the video.
+    video_column, panel_column = st.columns(
+        [1.15, 1],
+        gap="large"
+    )
+
+    with video_column:
+
+        st.markdown(
+            f"#### 🎬 {escape_markdown(str(st.session_state.video_name))}"
+        )
+
+
+
+        # ========================================================
+        # IMPORTANT:
+        # USE jump_time AS THE VIDEO START TIME
+        # ========================================================
+
+        current_start_time = (
+            st.session_state.jump_time
+            if st.session_state.jump_time is not None
+            else 0
+        )
+
+        st.video(
+            st.session_state.video_data,
+            start_time=current_start_time
+        )
+
+
+        # ========================================================
+        # SHOW CURRENT JUMP INFORMATION
+        # ========================================================
+
+        if st.session_state.jump_time is not None:
+
+            jump_time = (
+                st.session_state.jump_time
+            )
+
+            # jump_time is the POSITION in the video (in seconds), shown
+            # as m:ss like every other timestamp: 173 -> "2:53".
+            st.success(
+                f"🎯 Video opened at "
+                f"{format_timestamp(jump_time)}."
+            )
+
+            if st.button(
+                "⬅️ Return to Beginning"
+            ):
+
+                st.session_state.jump_time = None
+
+                st.rerun()
+
+
+    # ========================================================
+    # SECTIONS
+    # ========================================================
+    #
+    # A segmented control that remembers the open section (key
+    # "section"). Not st.tabs: a Jump click reruns the page and
+    # st.tabs can then fall back to its first tab.
+
+    with panel_column:
+
+        st.segmented_control(
+            "Section",
+            SECTIONS,
+            key="section",
+            label_visibility="collapsed"
+        )
+
+        section = (
+            st.session_state.section
+            or st.session_state.last_section
+        )
+
+        st.session_state.last_section = section
+
+else:
+
+    section = None
+
+    # ========================================================
+    # NO VIDEO YET
+    # ========================================================
+
+    with welcome_slot.container():
+
+        st.info(
+            "👈 Upload a video or paste a YouTube link "
+            "in the sidebar to start."
+        )
+
+        for column, (title, text) in zip(
+            st.columns(3),
+            [
+                (
+                    "💬 Ask Questions",
+                    "Answers come only from what the video says, "
+                    "with a Jump button to the exact moment."
+                ),
+                (
+                    "📋 Summary",
+                    "The main points of the video, each with its "
+                    "time and the words spoken there."
+                ),
+                (
+                    "🎓 Viva",
+                    "Questions about the video; your answers are "
+                    "checked against what the video says."
+                ),
+            ]
+        ):
+
+            with column:
+
+                with st.container(border=True):
+
+                    st.markdown(
+                        f"**{title}**"
+                    )
+
+                    st.caption(
+                        text
+                    )
+
+
+# ============================================================
+# CURRENT VIDEO (SIDEBAR)
+# ============================================================
+
+if st.session_state.video_data is not None:
+
+    current_box = st.sidebar.container(border=True)
+
+    current_box.markdown(
+        f"🎬 **Current video**  \n"
+        f"{escape_markdown(str(st.session_state.video_name))}"
+    )
+
+    # ========================================================
+    # REPROCESS VIDEO
+    # ========================================================
+    #
+    # A video that was processed before is loaded from the cache.
+    # This button deletes its cached transcript and summary and
+    # processes the video again from the beginning.
+    #
+    # Only offered while the video can still be read again (not
+    # after the uploaded file was removed from the uploader).
+
+    if video_source is not None and current_box.button(
+        "🔄 Reprocess video",
+        key="reprocess_video",
+        type="tertiary",
+        help=(
+            "Run transcription and the summary again "
+            "instead of using the saved results."
+        )
+    ):
+
+        processing_cache.clear_video(
+            st.session_state.video_hash
+        )
+
+        # A different hash makes the block above process the
+        # video again on the next run.
+        st.session_state.video_hash = None
+
+        st.session_state.video_summary = None
+
+        st.session_state.viva = None
+
+        st.session_state.viva_index = 0
+
+        st.session_state.viva_results = {}
+
+        st.rerun()
+
+
+# ============================================================
+# VIDEO SUMMARY
+# ============================================================
+#
+# Isolated feature. The logic is in src/rag/video_summary.py.
+#
+# Every summary point uses the start, end and text of a real
+# transcript chunk (nothing is invented), and its Jump button
+# uses the same seek/autoplay mechanism as the other Jump buttons.
+
+if (
+    st.session_state.video_summary is not None
+    and st.session_state.video_data is not None
+    and section == SECTION_SUMMARY
+):
+
     video_summary = (
         st.session_state.video_summary["summary"]
     )
 
     # --------------------------------------------------------
-    # DISPLAY (collapsible, collapsed by default)
+    # DISPLAY (in the Summary section, next to the video)
     # --------------------------------------------------------
-    # A rerun would otherwise collapse the section every time a
-    # Jump button is clicked, so it is kept open for the rerun
-    # that follows a summary Jump.
-    summary_expanded = (
-        st.session_state.summary_open
-    )
-
-    st.session_state.summary_open = False
-
-    with st.expander(
-        "📋 Video Summary",
-        expanded=summary_expanded
-    ):
+    with panel_column:
 
         if not video_summary["points"]:
 
@@ -1014,11 +1319,9 @@ if (
         else:
 
             st.markdown(
-                f"**Main Topic:** "
+                f"#### 📋 "
                 f"{escape_markdown(video_summary['main_topic'])}"
             )
-
-            total_points = len(video_summary["points"])
 
             for number, point in enumerate(
                 video_summary["points"],
@@ -1029,51 +1332,53 @@ if (
                     point["start"]
                 )
 
-                # Title
-                st.markdown(
-                    f"#### {number}. "
-                    f"{escape_markdown(point['title'])}"
-                )
+                # One card per summary point: title, summary, a
+                # short piece of the transcript, then time and Jump
+                # always on one row at the bottom.
+                with st.container(border=True):
 
-                # One-sentence summary
-                st.markdown(
-                    escape_markdown(
-                        point["summary"]
-                    )
-                )
-
-                # Timestamp (taken from the transcript chunk),
-                # shown as minutes:seconds
-                st.markdown(
-                    f"⏱ "
-                    f"{format_time_range(point['start'], point['end'])}"
-                )
-
-                # Supporting transcript evidence
-                st.markdown(
-                    "📝 "
-                    + escape_markdown(point["text"])
-                )
-
-                # Jump button (unique key per summary point)
-                if st.button(
-                    f"▶️ Jump to {format_timestamp(point['start'])}",
-                    key=(
-                        f"summary_jump_"
-                        f"{number}_"
-                        f"{start_time}"
-                    )
-                ):
-                    request_video_jump(
-                        start_time
+                    st.markdown(
+                        f"**{number}. "
+                        f"{escape_markdown(point['title'])}**"
                     )
 
-                    st.session_state.summary_open = True
+                    st.markdown(
+                        escape_markdown(
+                            point["summary"]
+                        )
+                    )
 
-                    st.rerun()
+                    st.caption(
+                        "📝 "
+                        + escape_markdown(
+                            shorten_text(point["text"])
+                        )
+                    )
 
-                if number < total_points:
-                    st.divider()
+                    time_column, jump_column = st.columns(
+                        [1, 1],
+                        vertical_alignment="center"
+                    )
+
+                    time_column.markdown(
+                        f"⏱ "
+                        f"{format_time_range(point['start'], point['end'])}"
+                    )
+
+                    # Jump button (unique key per summary point)
+                    if jump_column.button(
+                        f"▶️ Jump to {format_timestamp(point['start'])}",
+                        key=(
+                            f"summary_jump_"
+                            f"{number}_"
+                            f"{start_time}"
+                        )
+                    ):
+                        request_video_jump(
+                            start_time
+                        )
+
+                        st.rerun()
 
             if not video_summary["used_llm"]:
                 st.caption(
@@ -1099,6 +1404,7 @@ if (
     and st.session_state.video_data is not None
     and st.session_state.video_summary["video_hash"]
     == st.session_state.video_hash
+    and section == SECTION_VIVA
 ):
 
     viva = st.session_state.viva
@@ -1120,12 +1426,8 @@ if (
 
         st.session_state.viva_results = {}
 
-    # Open while a viva is running, so a rerun (Check, Next, Jump)
-    # does not collapse the section.
-    with st.expander(
-        "🎓 Viva Mode",
-        expanded=viva is not None
-    ):
+    # In the Viva section, next to the video.
+    with panel_column:
 
         # ----------------------------------------------------
         # NOT STARTED YET
@@ -1222,6 +1524,10 @@ if (
                     f"**Question {number + 1} of {total_questions}**"
                 )
 
+                st.progress(
+                    number / total_questions
+                )
+
                 st.markdown(
                     f"#### {escape_markdown(item['question'])}"
                 )
@@ -1287,38 +1593,41 @@ if (
                             f"❌ Incorrect. {feedback}"
                         )
 
-                    # Expected answer
-                    st.markdown(
-                        "**Expected answer:** "
-                        + escape_markdown(item["answer"])
-                    )
+                    # Expected answer, time and evidence in one card.
+                    with st.container(border=True):
 
-                    # Timestamp, shown as minutes:seconds
-                    st.markdown(
-                        f"⏱ "
-                        f"{format_time_range(item['start'], item['end'])}"
-                    )
-
-                    # Supporting transcript evidence
-                    st.markdown(
-                        "📝 "
-                        + escape_markdown(item["text"])
-                    )
-
-                    # Jump button (same mechanism as everywhere else)
-                    if st.button(
-                        f"▶️ Jump to {format_timestamp(item['start'])}",
-                        key=(
-                            f"viva_jump_"
-                            f"{number}_"
-                            f"{int(item['start'])}"
-                        )
-                    ):
-                        request_video_jump(
-                            int(item["start"])
+                        # Expected answer
+                        st.markdown(
+                            "**Expected answer:** "
+                            + escape_markdown(item["answer"])
                         )
 
-                        st.rerun()
+                        # Timestamp, shown as minutes:seconds
+                        st.markdown(
+                            f"⏱ "
+                            f"{format_time_range(item['start'], item['end'])}"
+                        )
+
+                        # Supporting transcript evidence
+                        st.markdown(
+                            "📝 "
+                            + escape_markdown(item["text"])
+                        )
+
+                        # Jump button (same mechanism as everywhere else)
+                        if st.button(
+                            f"▶️ Jump to {format_timestamp(item['start'])}",
+                            key=(
+                                f"viva_jump_"
+                                f"{number}_"
+                                f"{int(item['start'])}"
+                            )
+                        ):
+                            request_video_jump(
+                                int(item["start"])
+                            )
+
+                            st.rerun()
 
                     next_label = (
                         "➡️ Next Question"
@@ -1351,6 +1660,30 @@ if (
                     f"({final['percent']}%)"
                 )
 
+                # How many answers were correct, partly correct or
+                # incorrect (unanswered questions count as neither).
+                counts = {
+                    verdict: sum(
+                        1
+                        for result in results.values()
+                        if result["verdict"] == verdict
+                    )
+                    for verdict in ("correct", "partial", "incorrect")
+                }
+
+                for column, (label, verdict) in zip(
+                    st.columns(3),
+                    [
+                        ("✅ Correct", "correct"),
+                        ("🟡 Partly", "partial"),
+                        ("❌ Incorrect", "incorrect"),
+                    ]
+                ):
+                    column.metric(
+                        label,
+                        counts[verdict]
+                    )
+
                 verdict_icons = {
                     "correct": "✅",
                     "partial": "🟡",
@@ -1373,7 +1706,9 @@ if (
                         f"(⏱ {format_timestamp(item['start'])})"
                     )
 
-                restart_column, new_column = st.columns(2)
+                restart_column, new_column, _ = st.columns(
+                    [1, 1, 1]
+                )
 
                 with restart_column:
 
@@ -1417,570 +1752,640 @@ if (
 
 
 # ============================================================
-# MULTIMODAL RECORD PREVIEW
-# ============================================================
-
-if (
-    st.session_state.multimodal_records
-    is not None
-):
-
-    records = (
-        st.session_state.multimodal_records
-    )
-
-
-    st.markdown(
-        "## 🖼️ Multimodal Record Preview"
-    )
-
-
-    st.write(
-        f"Total structured records: "
-        f"{len(records)}"
-    )
-
-
-    if records:
-
-        # ----------------------------------------------------
-        # FIRST RECORD
-        # ----------------------------------------------------
-
-        first_record = records[0]
-
-
-        with st.expander(
-            "View first multimodal record"
-        ):
-
-            st.json(
-                first_record
-            )
-
-
-        # ----------------------------------------------------
-        # KEYFRAME PREVIEW
-        # ----------------------------------------------------
-
-        st.markdown(
-            "### 🖼️ Keyframe Preview"
-        )
-
-
-        if os.path.exists(
-            first_record["image_path"]
-        ):
-
-            st.image(
-                first_record["image_path"],
-                caption=(
-                    "Timestamp: "
-                    f"{first_record['timestamp']} "
-                    "seconds"
-                ),
-                use_container_width=True
-            )
-
-
-        # ----------------------------------------------------
-        # ASSOCIATED TRANSCRIPT
-        # ----------------------------------------------------
-
-        st.markdown(
-            "### 📝 Associated Transcript"
-        )
-
-
-        st.write(
-            first_record[
-                "transcript_text"
-            ]
-        )
-
-
-    else:
-
-        st.info(
-            "No keyframes matched the transcript "
-            "within the allowed tolerance."
-        )
-
-
-# ============================================================
 # QUESTION ANSWERING
 # ============================================================
 
 if (
     st.session_state.index
     is not None
+    and section == SECTION_ASK
 ):
 
-    st.markdown(
-        "## 💬 Ask Questions About Your Video"
-    )
+    with panel_column:
 
-
-    question = st.text_input(
-        "Enter your question:",
-        value=st.session_state.last_question,
-        placeholder=(
-            "Example: What is mentioned about "
-            "machine learning?"
+        st.markdown(
+            "#### 💬 Ask Questions About Your Video"
         )
-    )
 
 
-    ask_button = st.button(
-        "🔍 Ask Question"
-    )
+        # A form, so pressing Enter asks the question too.
+        with st.form(
+            "ask_form",
+            border=False
+        ):
 
-
-    # ========================================================
-    # ASK QUESTION
-    # ========================================================
-
-    if ask_button:
-
-        if not question:
-
-            st.warning(
-                "Please enter a question."
-            )
-
-        else:
-
-            # ------------------------------------------------
-            # GET STORED MODELS / DATA
-            # ------------------------------------------------
-
-            embedding_model = (
-                st.session_state.embedding_model
-            )
-
-            index = (
-                st.session_state.index
-            )
-
-            chunks = (
-                st.session_state.chunks
-            )
-
-
-            # ------------------------------------------------
-            # QUESTION EMBEDDING
-            # ------------------------------------------------
-
-            query_embedding = (
-                embedding_model.encode(
-                    question,
-                    normalize_embeddings=True
+            question = st.text_input(
+                "Enter your question:",
+                value=st.session_state.last_question,
+                placeholder=(
+                    "Example: What is mentioned about "
+                    "machine learning?"
                 )
             )
 
-
-            # ------------------------------------------------
-            # RETRIEVE RELEVANT CHUNKS
-            # ------------------------------------------------
-
-            results = retrieve_chunks(
-                index,
-                chunks,
-                query_embedding,
-                k=6,
-                threshold=0.25
-            )
-
-            # Also the chunk before and after every match, so a
-            # sentence cut between two chunks is complete again.
-            results = add_neighbouring_chunks(
-                results,
-                chunks
+            ask_button = st.form_submit_button(
+                "🔍 Ask Question"
             )
 
 
-            # ------------------------------------------------
-            # PREPARE CONTEXT
-            # ------------------------------------------------
+        # ----------------------------------------------------
+        # EXAMPLE QUESTIONS (from the summary point titles)
+        # ----------------------------------------------------
+        #
+        # One click asks it. Only shown before the first question,
+        # so they do not push the answer down.
 
-            context = prepare_context(
-                results
+        example_questions = make_example_questions(
+            st.session_state.video_summary
+        )
+
+        if (
+            example_questions
+            and st.session_state.last_answer is None
+        ):
+
+            st.caption(
+                "Try one of these:"
             )
 
+            for position, example in enumerate(example_questions):
 
-            # ------------------------------------------------
-            # GENERATE ANSWER
-            # ------------------------------------------------
+                if st.button(
+                    example,
+                    key=f"example_question_{position}"
+                ):
 
-            with st.spinner(
-                "Generating answer..."
-            ):
+                    question = example
 
-                try:
+                    ask_button = True
 
-                    answer = generate_answer(
-                        context,
-                        question
+
+        # ========================================================
+        # ASK QUESTION
+        # ========================================================
+
+        if ask_button:
+
+            if not question:
+
+                st.warning(
+                    "Please enter a question."
+                )
+
+            else:
+
+                # ------------------------------------------------
+                # GET STORED MODELS / DATA
+                # ------------------------------------------------
+
+                embedding_model = (
+                    st.session_state.embedding_model
+                )
+
+                index = (
+                    st.session_state.index
+                )
+
+                chunks = (
+                    st.session_state.chunks
+                )
+
+
+                # ------------------------------------------------
+                # QUESTION EMBEDDING
+                # ------------------------------------------------
+
+                query_embedding = (
+                    embedding_model.encode(
+                        question,
+                        normalize_embeddings=True
                     )
+                )
 
-                except LLMUnavailableError as error:
 
-                    # No answer is shown (not even the previous one):
-                    # only the message, and the question stays in
-                    # the box so it can be asked again.
-                    st.session_state.last_question = (
-                        question
-                    )
+                # ------------------------------------------------
+                # RETRIEVE RELEVANT CHUNKS
+                # ------------------------------------------------
 
-                    st.session_state.last_answer = None
+                results = retrieve_chunks(
+                    index,
+                    chunks,
+                    query_embedding,
+                    k=6,
+                    threshold=0.25
+                )
+
+                # Also the chunk before and after every match, so a
+                # sentence cut between two chunks is complete again.
+                results = add_neighbouring_chunks(
+                    results,
+                    chunks
+                )
+
+
+                # ------------------------------------------------
+                # PREPARE CONTEXT
+                # ------------------------------------------------
+
+                context = prepare_context(
+                    results
+                )
+
+
+                # ------------------------------------------------
+                # GENERATE ANSWER
+                # ------------------------------------------------
+
+                with st.spinner(
+                    "Generating answer..."
+                ):
+
+                    try:
+
+                        answer = generate_answer(
+                            context,
+                            question
+                        )
+
+                    except LLMUnavailableError as error:
+
+                        # No answer is shown (not even the previous one):
+                        # only the message, and the question stays in
+                        # the box so it can be asked again.
+                        st.session_state.last_question = (
+                            question
+                        )
+
+                        st.session_state.last_answer = None
+
+                        st.session_state.last_evidence_segments = []
+
+                        st.session_state.last_related_keyframe = None
+
+                        st.session_state.qa_error = str(error)
+
+                        st.rerun()
+
+
+                # A successful answer clears an earlier error message.
+                st.session_state.qa_error = None
+
+
+                # ------------------------------------------------
+                # SAVE ANSWER IN SESSION STATE
+                # ------------------------------------------------
+
+                st.session_state.last_question = (
+                    question
+                )
+
+                st.session_state.last_answer = (
+                    answer
+                )
+
+
+                # Clear previous jump when asking a new question
+                st.session_state.jump_time = None
+
+
+                # =================================================
+                # FIND EVIDENCE SEGMENTS
+                # =================================================
+
+                if (
+                    "don't have enough information"
+                    in answer.lower()
+                ):
 
                     st.session_state.last_evidence_segments = []
 
                     st.session_state.last_related_keyframe = None
 
-                    st.session_state.qa_error = str(error)
+                else:
 
-                    st.rerun()
+                    # Two consecutive transcript pieces, chosen by the
+                    # question and the answer (see find_evidence).
+                    evidence_segments = (
+                        find_evidence(
+                            results,
+                            question,
+                            answer,
+                            embedding_model
+                        )
+                    )
 
 
-            # A successful answer clears an earlier error message.
-            st.session_state.qa_error = None
+                    st.session_state.last_evidence_segments = (
+                        evidence_segments
+                    )
 
 
-            # ------------------------------------------------
-            # SAVE ANSWER IN SESSION STATE
-            # ------------------------------------------------
+                    # =================================================
+                    # FIND RELATED KEYFRAME
+                    # =================================================
 
-            st.session_state.last_question = (
-                question
+                    related_keyframe = None
+
+
+                    records = (
+                        st.session_state.multimodal_records
+                    )
+
+
+                    if (
+                        records
+                        and evidence_segments
+                    ):
+
+                        start_time = (
+                            float(
+                                evidence_segments[0][
+                                    "start"
+                                ]
+                            )
+                        )
+
+
+                        closest_distance = (
+                            float("inf")
+                        )
+
+
+                        for record in records:
+
+                            try:
+
+                                record_time = float(
+                                    record[
+                                        "timestamp"
+                                    ]
+                                )
+
+
+                                distance = abs(
+                                    record_time
+                                    - start_time
+                                )
+
+
+                                if (
+                                    distance
+                                    < closest_distance
+                                ):
+
+                                    closest_distance = (
+                                        distance
+                                    )
+
+                                    related_keyframe = (
+                                        record
+                                    )
+
+
+                            except (
+                                KeyError,
+                                ValueError,
+                                TypeError
+                            ):
+
+                                continue
+
+
+                    st.session_state.last_related_keyframe = (
+                        related_keyframe
+                    )
+
+
+                # =================================================
+                # FORCE RERUN SO RESULTS ARE DISPLAYED
+                # =================================================
+
+                st.rerun()
+
+
+        # ========================================================
+        # LANGUAGE MODEL NOT AVAILABLE
+        # ========================================================
+
+        if st.session_state.qa_error:
+
+            st.error(
+                f"⚠️ {st.session_state.qa_error}"
             )
 
-            st.session_state.last_answer = (
-                answer
+
+        # ========================================================
+        # DISPLAY STORED ANSWER
+        # ========================================================
+
+        if (
+            st.session_state.last_answer
+            is not None
+        ):
+
+            st.markdown(
+                "#### 🧠 Answer"
             )
 
 
-            # Clear previous jump when asking a new question
-            st.session_state.jump_time = None
+            with st.container(border=True):
+
+                st.write(
+                    st.session_state.last_answer
+                )
 
 
-            # =================================================
-            # FIND EVIDENCE SEGMENTS
-            # =================================================
+            answer = (
+                st.session_state.last_answer
+            )
+
+
+            # ====================================================
+            # NO ANSWER / NO INFORMATION
+            # ====================================================
 
             if (
                 "don't have enough information"
                 in answer.lower()
             ):
 
-                st.session_state.last_evidence_segments = []
+                st.markdown(
+                    "#### ⏱️ Relevant Timestamps"
+                )
 
-                st.session_state.last_related_keyframe = None
+                st.info(
+                    "No relevant information "
+                    "was found in the video."
+                )
+
+
+            # ====================================================
+            # DISPLAY EVIDENCE
+            # ====================================================
 
             else:
 
-                # Two consecutive transcript pieces, chosen by the
-                # question and the answer (see find_evidence).
                 evidence_segments = (
-                    find_evidence(
-                        results,
-                        question,
-                        answer,
-                        embedding_model
-                    )
+                    st.session_state.last_evidence_segments
                 )
 
 
-                st.session_state.last_evidence_segments = (
-                    evidence_segments
+                st.markdown(
+                    "#### ⏱️ Relevant Timestamps"
                 )
 
 
-                # =================================================
-                # FIND RELATED KEYFRAME
-                # =================================================
+                if not evidence_segments:
 
-                related_keyframe = None
-
-
-                records = (
-                    st.session_state.multimodal_records
-                )
-
-
-                if (
-                    records
-                    and evidence_segments
-                ):
-
-                    start_time = (
-                        float(
-                            evidence_segments[0][
-                                "start"
-                            ]
-                        )
+                    st.info(
+                        "No precise evidence "
+                        "segment was found."
                     )
 
 
-                    closest_distance = (
-                        float("inf")
-                    )
+                else:
 
+                    # Where the video says it: separate from the answer.
+                    evidence_box = st.container(border=True)
 
-                    for record in records:
+                    with evidence_box:
 
-                        try:
+                        for segment in evidence_segments:
 
-                            record_time = float(
-                                record[
-                                    "timestamp"
-                                ]
+                            start_time = int(
+                                segment["start"]
+                            )
+
+                            end_time = int(
+                                segment["end"]
                             )
 
 
-                            distance = abs(
-                                record_time
-                                - start_time
+                            # ----------------------------------------
+                            # TIMESTAMP
+                            # ----------------------------------------
+
+                            st.markdown(
+                                f"##### ⏱️ "
+                                f"{format_time_range(segment['start'], segment['end'])}"
                             )
 
 
-                            if (
-                                distance
-                                < closest_distance
+                            # ----------------------------------------
+                            # TRANSCRIPT EVIDENCE
+                            # ----------------------------------------
+
+                            st.write(
+                                segment["text"]
+                            )
+
+
+                            # ----------------------------------------
+                            # JUMP BUTTON
+                            # ----------------------------------------
+
+                            if st.button(
+                                f"▶️ Jump to {format_timestamp(segment['start'])}",
+                                key=(
+                                    f"jump_"
+                                    f"{start_time}"
+                                )
                             ):
 
-                                closest_distance = (
-                                    distance
+                                # THIS IS THE IMPORTANT PART
+                                st.session_state.jump_time = (
+                                    start_time
                                 )
 
-                                related_keyframe = (
-                                    record
-                                )
+                                # Command the browser to seek the real
+                                # <video> element (sent at the end of
+                                # the script, after the player exists).
+                                st.session_state.seek_counter += 1
+
+                                st.session_state.seek_request = {
+                                    "time": start_time,
+                                    "id": st.session_state.seek_counter,
+                                }
+
+                                st.rerun()
 
 
-                        except (
-                            KeyError,
-                            ValueError,
-                            TypeError
-                        ):
+                            # ----------------------------------------
+                            # VIDEO EVIDENCE INFO
+                            # ----------------------------------------
 
-                            continue
+                            st.caption(
+                                f"Video evidence: "
+                                f"{format_time_range(segment['start'], segment['end'])}"
+                            )
 
 
-                st.session_state.last_related_keyframe = (
-                    related_keyframe
+                # =================================================
+                # RELATED KEYFRAME
+                # =================================================
+
+                related_keyframe = (
+                    st.session_state.last_related_keyframe
                 )
 
 
-            # =================================================
-            # FORCE RERUN SO RESULTS ARE DISPLAYED
-            # =================================================
+                if related_keyframe:
 
-            st.rerun()
+                    st.markdown(
+                        "##### 🖼️ Related Keyframe"
+                    )
 
 
-    # ========================================================
-    # LANGUAGE MODEL NOT AVAILABLE
-    # ========================================================
+                    if os.path.exists(
+                        related_keyframe[
+                            "image_path"
+                        ]
+                    ):
 
-    if st.session_state.qa_error:
+                        st.image(
+                            related_keyframe[
+                                "image_path"
+                            ],
+                            caption=(
+                                "Keyframe at "
+                                f"{format_timestamp(related_keyframe['timestamp'])}"
+                            ),
+                            use_container_width=True
+                        )
 
-        st.error(
-            f"⚠️ {st.session_state.qa_error}"
+
+                    # ---------------------------------------------
+                    # RELATED TRANSCRIPT
+                    # ---------------------------------------------
+
+                    st.markdown(
+                        "##### 📝 Related Transcript"
+                    )
+
+
+                    st.write(
+                        related_keyframe[
+                            "transcript_text"
+                        ]
+                    )
+
+
+# ============================================================
+# DEVELOPER DETAILS (MULTIMODAL RECORD PREVIEW)
+# ============================================================
+#
+# What the pipeline produced (keyframes matched with the transcript),
+# for checking and for the project report. Collapsed at the bottom.
+
+if (
+    st.session_state.multimodal_records
+    is not None
+    and st.session_state.video_data is not None
+):
+
+    with st.expander(
+        "🛠 Developer details",
+        expanded=False
+    ):
+
+        records = (
+            st.session_state.multimodal_records
         )
 
 
-    # ========================================================
-    # DISPLAY STORED ANSWER
-    # ========================================================
-
-    if (
-        st.session_state.last_answer
-        is not None
-    ):
-
         st.markdown(
-            "## 🧠 Answer"
+            "##### 🖼️ Multimodal Record Preview"
         )
 
 
         st.write(
-            st.session_state.last_answer
+            f"Total structured records: "
+            f"{len(records)}"
         )
 
 
-        answer = (
-            st.session_state.last_answer
-        )
+        if records:
+
+            # ----------------------------------------------------
+            # FIRST RECORD
+            # ----------------------------------------------------
+
+            first_record = records[0]
 
 
-        # ====================================================
-        # NO ANSWER / NO INFORMATION
-        # ====================================================
+            st.caption(
+                "First multimodal record:"
+            )
 
-        if (
-            "don't have enough information"
-            in answer.lower()
-        ):
+            st.json(
+                first_record,
+                expanded=False
+            )
+
+
+            # ----------------------------------------------------
+            # KEYFRAME PREVIEW
+            # ----------------------------------------------------
 
             st.markdown(
-                "## ⏱️ Relevant Timestamps"
-            )
-
-            st.info(
-                "No relevant information "
-                "was found in the video."
+                "##### 🖼️ Keyframe Preview"
             )
 
 
-        # ====================================================
-        # DISPLAY EVIDENCE
-        # ====================================================
+            if os.path.exists(
+                first_record["image_path"]
+            ):
+
+                st.image(
+                    first_record["image_path"],
+                    caption=(
+                        "Keyframe at "
+                        f"{format_timestamp(first_record['timestamp'])}"
+                    ),
+                    use_container_width=True
+                )
+
+
+            # ----------------------------------------------------
+            # ASSOCIATED TRANSCRIPT
+            # ----------------------------------------------------
+
+            st.markdown(
+                "##### 📝 Associated Transcript"
+            )
+
+
+            st.write(
+                first_record[
+                    "transcript_text"
+                ]
+            )
+
 
         else:
 
-            evidence_segments = (
-                st.session_state.last_evidence_segments
+            st.info(
+                "No keyframes matched the transcript "
+                "within the allowed tolerance."
             )
 
 
-            st.markdown(
-                "## ⏱️ Relevant Timestamps"
-            )
+# ============================================================
+# ABOUT (SIDEBAR)
+# ============================================================
 
+with st.sidebar:
 
-            if not evidence_segments:
+    with st.expander(
+        "ℹ️ About this app"
+    ):
 
-                st.info(
-                    "No precise evidence "
-                    "segment was found."
-                )
-
-
-            else:
-
-                for segment in evidence_segments:
-
-                    start_time = int(
-                        segment["start"]
-                    )
-
-                    end_time = int(
-                        segment["end"]
-                    )
-
-
-                    # ----------------------------------------
-                    # TIMESTAMP
-                    # ----------------------------------------
-
-                    st.markdown(
-                        f"### ⏱️ "
-                        f"{format_time_range(segment['start'], segment['end'])}"
-                    )
-
-
-                    # ----------------------------------------
-                    # TRANSCRIPT EVIDENCE
-                    # ----------------------------------------
-
-                    st.write(
-                        segment["text"]
-                    )
-
-
-                    # ----------------------------------------
-                    # JUMP BUTTON
-                    # ----------------------------------------
-
-                    if st.button(
-                        f"▶️ Jump to {format_timestamp(segment['start'])}",
-                        key=(
-                            f"jump_"
-                            f"{start_time}"
-                        )
-                    ):
-
-                        # THIS IS THE IMPORTANT PART
-                        st.session_state.jump_time = (
-                            start_time
-                        )
-
-                        # Command the browser to seek the real
-                        # <video> element (sent at the end of
-                        # the script, after the player exists).
-                        st.session_state.seek_counter += 1
-
-                        st.session_state.seek_request = {
-                            "time": start_time,
-                            "id": st.session_state.seek_counter,
-                        }
-
-                        st.rerun()
-
-
-                    # ----------------------------------------
-                    # VIDEO EVIDENCE INFO
-                    # ----------------------------------------
-
-                    st.caption(
-                        f"Video evidence starts "
-                        f"at approximately "
-                        f"{start_time} seconds "
-                        f"and ends at "
-                        f"{end_time} seconds."
-                    )
-
-
-            # =================================================
-            # RELATED KEYFRAME
-            # =================================================
-
-            related_keyframe = (
-                st.session_state.last_related_keyframe
-            )
-
-
-            if related_keyframe:
-
-                st.markdown(
-                    "### 🖼️ Related Keyframe"
-                )
-
-
-                if os.path.exists(
-                    related_keyframe[
-                        "image_path"
-                    ]
-                ):
-
-                    st.image(
-                        related_keyframe[
-                            "image_path"
-                        ],
-                        caption=(
-                            "Keyframe at "
-                            f"{related_keyframe['timestamp']} "
-                            "seconds"
-                        ),
-                        use_container_width=True
-                    )
-
-
-                # ---------------------------------------------
-                # RELATED TRANSCRIPT
-                # ---------------------------------------------
-
-                st.markdown(
-                    "### 📝 Related Transcript"
-                )
-
-
-                st.write(
-                    related_keyframe[
-                        "transcript_text"
-                    ]
-                )
+        st.markdown(
+            "- **Transcript:** Whisper (base)\n"
+            "- **Search:** MiniLM embeddings + FAISS\n"
+            "- **Answers, summary, viva:** llama3.2 via Ollama\n"
+            "- Everything runs **locally** on this computer."
+        )
 
 
 # ============================================================
