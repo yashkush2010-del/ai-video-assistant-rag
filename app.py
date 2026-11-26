@@ -44,6 +44,11 @@ from src.rag.viva import (
 
 from src.processing import processing_cache
 
+from src.processing.evidence_frame import (
+    extract_frame_at,
+    frame_time
+)
+
 from src.rag.report_export import (
     summary_report,
     viva_report,
@@ -2122,6 +2127,39 @@ if (
                                 continue
 
 
+                    # Better: a picture from the exact moment of the
+                    # evidence (keyframes are only every 30 s, so the
+                    # nearest one can show another scene). The nearest
+                    # keyframe above is kept only if this fails.
+                    if (
+                        evidence_segments
+                        and st.session_state.video_path
+                    ):
+
+                        moment = frame_time(
+                            evidence_segments[0]["start"],
+                            evidence_segments[0]["end"]
+                        )
+
+                        frame_path = extract_frame_at(
+                            st.session_state.video_path,
+                            moment,
+                            os.path.join(
+                                "data",
+                                "keyframes",
+                                str(st.session_state.video_name)
+                            )
+                        )
+
+                        if frame_path:
+
+                            related_keyframe = {
+                                "image_path": frame_path,
+                                "timestamp": moment,
+                                "exact": True
+                            }
+
+
                     st.session_state.last_related_keyframe = (
                         related_keyframe
                     )
@@ -2302,8 +2340,15 @@ if (
 
                 if related_keyframe:
 
+                    exact_frame = related_keyframe.get(
+                        "exact",
+                        False
+                    )
+
                     st.markdown(
-                        "##### 🖼️ Related Keyframe"
+                        "##### 🖼️ At this moment in the video"
+                        if exact_frame
+                        else "##### 🖼️ Related Keyframe"
                     )
 
 
@@ -2318,8 +2363,14 @@ if (
                                 "image_path"
                             ],
                             caption=(
-                                "Keyframe at "
-                                f"{format_timestamp(related_keyframe['timestamp'])}"
+                                (
+                                    "Video frame at "
+                                    if exact_frame
+                                    else "Nearest keyframe at "
+                                )
+                                + format_timestamp(
+                                    related_keyframe["timestamp"]
+                                )
                             ),
                             use_container_width=True
                         )
@@ -2328,17 +2379,21 @@ if (
                     # ---------------------------------------------
                     # RELATED TRANSCRIPT
                     # ---------------------------------------------
+                    # Only for the nearest stored keyframe: an exact
+                    # frame belongs to the evidence shown above.
 
-                    st.markdown(
-                        "##### 📝 Related Transcript"
-                    )
+                    if not exact_frame:
+
+                        st.markdown(
+                            "##### 📝 Related Transcript"
+                        )
 
 
-                    st.write(
-                        related_keyframe[
-                            "transcript_text"
-                        ]
-                    )
+                        st.write(
+                            related_keyframe[
+                                "transcript_text"
+                            ]
+                        )
 
 
 # ============================================================
