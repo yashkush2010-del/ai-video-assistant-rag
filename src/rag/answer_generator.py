@@ -84,6 +84,11 @@ MODEL_NOT_FOUND_MESSAGE = (
 )
 
 
+def model_not_found_message(model):
+    """MODEL_NOT_FOUND_MESSAGE for any model (e.g. the larger one)."""
+    return MODEL_NOT_FOUND_MESSAGE.replace(LLM_MODEL, model)
+
+
 class LLMUnavailableError(Exception):
     """Ollama could not produce an answer. str(error) is shown to the user."""
 
@@ -155,7 +160,7 @@ __NO_INFORMATION__
 Answer:"""
 
 
-def generate_answer(context, question):
+def generate_answer(context, question, model=LLM_MODEL):
     # Nothing in the video matched the question: there is nothing to
     # answer from, so the answer is known without asking the model.
     if not str(context or "").strip():
@@ -173,7 +178,7 @@ def generate_answer(context, question):
 
     try:
         response = ollama.chat(
-            model=LLM_MODEL,
+            model=model,
             messages=[
                 {
                     "role": "user",
@@ -196,7 +201,9 @@ def generate_answer(context, question):
             getattr(error, "status_code", None) == 404
             or "not found" in str(error).lower()
         ):
-            raise LLMUnavailableError(MODEL_NOT_FOUND_MESSAGE) from error
+            raise LLMUnavailableError(
+                model_not_found_message(model)
+            ) from error
 
         raise LLMUnavailableError(
             f"The language model could not answer this question "

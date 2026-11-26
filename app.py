@@ -44,6 +44,12 @@ from src.rag.viva import (
 
 from src.processing import processing_cache
 
+from src.rag.report_export import (
+    summary_report,
+    viva_report,
+    report_file_name
+)
+
 from src.ingestion.youtube_loader import (
     DEFAULT_CACHE_DIR as YOUTUBE_CACHE_DIR,
     YouTubeError,
@@ -150,6 +156,23 @@ SECTIONS = [
     SECTION_SUMMARY,
     SECTION_VIVA
 ]
+
+
+# ============================================================
+# ANSWER MODEL (Q&A)
+# ============================================================
+#
+# Q&A answers can use a larger model. llama3.1 (8B) writes more
+# complete answers but is about 2-3x slower on a laptop CPU and has
+# to be downloaded once ("ollama pull llama3.1"). The Summary and
+# Viva always use llama3.2 (many calls; the larger model would make
+# them too slow). If a chosen model is missing, Q&A says how to
+# install it (the same message as for llama3.2).
+
+ANSWER_MODELS = {
+    "llama3.2 (fast)": "llama3.2",
+    "llama3.1 8B (better, slower)": "llama3.1"
+}
 
 
 # ============================================================
@@ -1323,6 +1346,22 @@ if (
                 f"{escape_markdown(video_summary['main_topic'])}"
             )
 
+            # A printable page (Print -> Save as PDF for a PDF).
+            st.download_button(
+                "⬇️ Download summary",
+                data=summary_report(
+                    st.session_state.video_name,
+                    video_summary
+                ),
+                file_name=report_file_name(
+                    st.session_state.video_name,
+                    "summary"
+                ),
+                mime="text/html",
+                key="download_summary",
+                help="A printable page. Use Print > Save as PDF for a PDF."
+            )
+
             for number, point in enumerate(
                 video_summary["points"],
                 start=1
@@ -1706,6 +1745,32 @@ if (
                         f"(⏱ {format_timestamp(item['start'])})"
                     )
 
+                # What the student typed, for the report.
+                typed_answers = {
+                    position: st.session_state.get(
+                        f"viva_answer_{viva['attempt']}_{position}"
+                    )
+                    for position in range(total_questions)
+                }
+
+                st.download_button(
+                    "⬇️ Download results",
+                    data=viva_report(
+                        st.session_state.video_name,
+                        questions,
+                        results,
+                        final,
+                        typed_answers
+                    ),
+                    file_name=report_file_name(
+                        st.session_state.video_name,
+                        "viva_results"
+                    ),
+                    mime="text/html",
+                    key="download_viva",
+                    help="A printable page. Use Print > Save as PDF for a PDF."
+                )
+
                 restart_column, new_column, _ = st.columns(
                     [1, 1, 1]
                 )
@@ -1904,7 +1969,13 @@ if (
 
                         answer = generate_answer(
                             context,
-                            question
+                            question,
+                            # Read from the dropdown's own state: the
+                            # Settings box is drawn later in the page.
+                            model=ANSWER_MODELS.get(
+                                st.session_state.get("answer_model_label"),
+                                "llama3.2"
+                            )
                         )
 
                     except LLMUnavailableError as error:
@@ -2377,13 +2448,29 @@ if (
 with st.sidebar:
 
     with st.expander(
+        "⚙️ Settings"
+    ):
+
+        st.selectbox(
+            "Model for answers",
+            list(ANSWER_MODELS),
+            key="answer_model_label",
+            help=(
+                "Used for Ask Questions. The larger model gives more "
+                "complete answers but is slower. Install it once with: "
+                "ollama pull llama3.1"
+            )
+        )
+
+    with st.expander(
         "ℹ️ About this app"
     ):
 
         st.markdown(
             "- **Transcript:** Whisper (base)\n"
             "- **Search:** MiniLM embeddings + FAISS\n"
-            "- **Answers, summary, viva:** llama3.2 via Ollama\n"
+            "- **Answers:** llama3.2, or llama3.1 8B (Settings)\n"
+            "- **Summary and viva:** llama3.2 via Ollama\n"
             "- Everything runs **locally** on this computer."
         )
 

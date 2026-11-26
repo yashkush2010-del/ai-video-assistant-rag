@@ -367,3 +367,55 @@ def test_the_app_answers_no_information_when_nothing_matches(env, monkeypatch):
 
 
 from test_youtube_ingestion_app import env  # noqa: E402,F401
+
+
+# ============================================================
+# The model for answers (Settings in the sidebar)
+# ============================================================
+
+def test_the_answer_model_can_be_chosen(answer_generator):
+    answer_generator.generate_answer("[0:00 - 0:05]\nSome text.\n\n", "Q?", model="llama3.1")
+
+    assert answer_generator.fake_ollama.calls[0]["model"] == "llama3.1"
+
+
+def test_the_default_answer_model_is_llama3_2(answer_generator):
+    answer_generator.generate_answer("[0:00 - 0:05]\nSome text.\n\n", "Q?")
+
+    assert answer_generator.fake_ollama.calls[0]["model"] == "llama3.2"
+
+
+def test_a_missing_larger_model_says_how_to_install_it(answer_generator):
+    def missing(**kwargs):
+        error = answer_generator.fake_ollama.ResponseError("model not found")
+        error.status_code = 404
+        raise error
+
+    answer_generator.fake_ollama.chat = missing
+
+    with pytest.raises(answer_generator.LLMUnavailableError) as raised:
+        answer_generator.generate_answer("[0:00 - 0:05]\nText.\n\n", "Q?", model="llama3.1")
+
+    assert 'ollama pull llama3.1' in str(raised.value)
+    assert "llama3.2" not in str(raised.value)
+
+
+def test_the_app_uses_the_model_chosen_in_settings(env, monkeypatch):
+    from test_qa_ollama_unavailable import ask
+
+    env.set_upload("lecture.mp4")
+    at = env.start()
+
+    models = []
+    monkeypatch.setattr(
+        sys.modules["ollama"], "chat",
+        lambda **kwargs: models.append(kwargs["model"]) or {"message": {"content": "An answer."}},
+    )
+
+    at.selectbox(key="answer_model_label").set_value("llama3.1 8B (better, slower)")
+    at.run()
+
+    at = ask(at, "What is machine learning?")
+
+    assert not at.exception, [e.value for e in at.exception]
+    assert models and models[-1] == "llama3.1"
