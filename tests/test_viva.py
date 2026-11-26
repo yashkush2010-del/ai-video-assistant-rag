@@ -2592,3 +2592,74 @@ def test_an_ordinary_one_sentence_question_is_still_used():
     item = generate_viva_questions([REAL_PAUL_POINT], llm=llm)[0]
 
     assert item["source"] == "llm_answer_sentence"
+
+
+
+# ============================================================
+# ROUND 6: A CAUSE / EFFECT QUESTION NEEDS A CAUSE IN THE ANSWER
+# ============================================================
+
+REAL_CAUSE_QUESTION = (
+    # what llama3.2 asked on the real video for "So that's Paul. He
+    # loves listening to new songs. He either likes them or dislikes them."
+    "QUESTION: What influences his preference for new songs?"
+)
+
+
+def test_the_real_influence_question_is_not_used_without_a_cause():
+    llm = routed_llm(
+        step_one=REJECTED_STEP_ONE,
+        answer_first=REAL_CAUSE_QUESTION,
+        one_sentence=REAL_CAUSE_QUESTION,
+    )
+
+    item = generate_viva_questions([REAL_PAUL_POINT], llm=llm)[0]
+
+    assert "influence" not in item["question"].lower()
+    assert item["source"] not in ("llm_answer_first", "llm_answer_sentence")
+
+
+def test_the_cause_reason_is_logged(caplog):
+    llm = routed_llm(
+        step_one=REJECTED_STEP_ONE,
+        answer_first=REAL_CAUSE_QUESTION,
+        one_sentence=REAL_CAUSE_QUESTION,
+    )
+
+    with caplog.at_level("WARNING", logger="src.rag.viva"):
+        generate_viva_questions([REAL_PAUL_POINT], llm=llm)
+
+    assert "asks for a cause the answer does not give" in caplog.text
+
+
+@pytest.mark.parametrize("question, answer, problem", [
+    # a cause is asked and not given
+    ("What influences his preference for new songs?",
+     "He loves listening to new songs. He either likes them or dislikes them.", True),
+    ("What causes surge pricing?",
+     "Surge pricing is used by Uber.", True),
+    ("Which factors affect the price of a trip?",
+     "The fare of your trip has been updated.", True),
+    ("How does more data affect the model?",
+     "There are many ways in which the machine learns.", True),
+    ("What is the effect of the feedback on the machine?",
+     "That is reinforcement learning.", True),
+    # a cause is asked and given
+    ("What influences Paul's choice of songs?",
+     "Paul decides this on the basis of the song's tempo, genre, intensity and the gender of voice.", False),
+    ("What determines the surge price?",
+     "Prices change in real time based on demand and the number of cars available.", False),
+    ("How does more data affect the model?",
+     "More data leads to a better model and higher accuracy.", False),
+    # not cause questions: unchanged
+    ("What does the model determine from the weight of a coin?",
+     "The currency of the coin.", False),
+    ("How does Paul decide whether he likes a song?",
+     "On the tempo and intensity of the song.", False),
+    ("What does supervised learning use?",
+     "Labeled data.", False),
+])
+def test_cause_questions(question, answer, problem):
+    found = viva._asks_more_than_the_answer_gives(question, answer)
+
+    assert (found is not None) is problem

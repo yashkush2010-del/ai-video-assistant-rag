@@ -609,6 +609,32 @@ _STATES_A_REASON = re.compile(
 )
 
 
+# Cause / effect questions (real case on the machine learning video:
+# "What influences his preference for new songs?" for "He loves
+# listening to new songs. He either likes them or dislikes them.").
+# Kept narrow on purpose: only a question that clearly asks what
+# CAUSES something. "What does the model determine?" asks for an
+# outcome, so the verb must come right after "what"/"which".
+_ASKS_FOR_CAUSE = re.compile(
+    r"^\s*(what|which)\s+(factors?\s+|things?\s+)?"
+    r"(influences?|influenced|causes?|caused|affects?|affected|"
+    r"determines?|determined|leads?\s+to|led\s+to|drives?)\b"
+    r"|^\s*what\s+factors?\b"
+    r"|\bhow\s+does\s+[^?]+?\s+(affect|influence)\b"
+    r"|\b(effect|effects|impact|cause|causes)\s+of\b",
+    flags=re.IGNORECASE
+)
+
+_STATES_A_CAUSE = re.compile(
+    r"\b(because|since|so that|so|therefore|hence|thus|due to|"
+    r"as a result|in order to|which is why|that is why|that's why|"
+    r"based on|on the basis of|depends on|depending on|"
+    r"determined by|influenced by|caused by|affected by|"
+    r"leads to|led to|results in|resulted in|because of)\b",
+    flags=re.IGNORECASE
+)
+
+
 def _asks_more_than_the_answer_gives(question, answer):
     """
     A reason when the question asks for a difference or a reason that the
@@ -621,6 +647,9 @@ def _asks_more_than_the_answer_gives(question, answer):
 
     if _ASKS_FOR_REASON.search(str(question)) and not _STATES_A_REASON.search(answer):
         return "the question asks for a reason the answer does not give"
+
+    if _ASKS_FOR_CAUSE.search(str(question)) and not _STATES_A_CAUSE.search(answer):
+        return "the question asks for a cause the answer does not give"
 
     return None
 
